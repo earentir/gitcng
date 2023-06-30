@@ -2,6 +2,7 @@
 
 Example Run
 
+```
 [earentir@Athena gitcng]$ ./gitcng ../
 2023/07/01 02:15:32 Visiting path: ../ at depth: 0
 2023/07/01 02:15:32 Visiting path: ../antonis at depth: 1
@@ -70,3 +71,4 @@ Remote Changes: 0
 In Folder [../whichdns]: git present
 Local Changes: 0
 Remote Changes: 0
+```
