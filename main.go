@@ -1,9 +1,9 @@
+// Package main provides a command line tool to check for git repositories in a directory tree
 package main
 
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/url"
@@ -11,23 +11,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-git/go-git/plumbing/storer"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
-type RepoStatus struct {
+type repoStatus struct {
 	Path          string
 	LocalChanges  int
 	RemoteChanges int
 }
 
 var maxDepth int
-var repos []RepoStatus
+var repos []repoStatus
 var rootPath string // global rootPath variable
 
 func getSignersFromAgent() ([]ssh.Signer, error) {
@@ -46,39 +44,12 @@ func getSignersFromAgent() ([]ssh.Signer, error) {
 	return signers, nil
 }
 
-func countRemoteChanges(r *git.Repository, headRef *plumbing.Reference, remoteRef *plumbing.Reference) (int, error) {
-	// No remote changes if the hashes are the same
-	if headRef.Hash() == remoteRef.Hash() {
-		return 0, nil
-	}
-
-	cIter, err := r.Log(&git.LogOptions{From: remoteRef.Hash()})
-	if err != nil {
-		return 0, err
-	}
-
-	remoteChanges := 0
-	err = cIter.ForEach(func(c *object.Commit) error {
-		if c.Hash == headRef.Hash() {
-			// Stop iteration when we reach the local HEAD
-			return storer.ErrStop
-		}
-		remoteChanges++
-		return nil
-	})
-
-	if err != nil && err != storer.ErrStop {
-		return 0, err
-	}
-
-	return remoteChanges, nil
-}
-
 func visitAndCheckGit(path string, depth int) {
 	if depth > maxDepth {
 		return
 	}
 	log.Printf("Visiting path: %s at depth: %d\n", path, depth)
+
 	// checking if current directory is a git repository
 	r, err := git.PlainOpen(path)
 	if err == nil {
@@ -181,21 +152,21 @@ func visitAndCheckGit(path string, depth int) {
 			return
 		}
 
-		repos = append(repos, RepoStatus{Path: path, LocalChanges: localChanges, RemoteChanges: remoteChanges})
+		repos = append(repos, repoStatus{Path: path, LocalChanges: localChanges, RemoteChanges: remoteChanges})
 
 		// return here because we don't need to check subdirectories if this is a git repo
 		return
 	}
 
 	// getting subdirectories
-	files, err := ioutil.ReadDir(path)
+	files, err := os.ReadDir(path)
 	if err != nil {
 		log.Printf("Error reading directory %s: %s\n", path, err)
 		return
 	}
 
 	for _, f := range files {
-		if f.IsDir() && f.Mode()&os.ModeSymlink != os.ModeSymlink {
+		if f.Type().IsDir() && f.Type()&os.ModeSymlink != os.ModeSymlink {
 			visitAndCheckGit(filepath.Join(path, f.Name()), depth+1)
 		}
 	}
@@ -222,14 +193,4 @@ func main() {
 		fmt.Println("Local Changes:", repo.LocalChanges)
 		fmt.Println("Remote Changes:", repo.RemoteChanges)
 	}
-}
-
-func countChanges(status git.Status) int {
-	changes := 0
-	for _, s := range status {
-		if s.Staging != git.Unmodified || s.Worktree != git.Unmodified {
-			changes++
-		}
-	}
-	return changes
 }
