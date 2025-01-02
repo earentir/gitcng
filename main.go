@@ -28,6 +28,29 @@ var maxDepth int
 var repos []repoStatus
 var rootPath string // global rootPath variable
 
+func main() {
+	maxDepthPtr := flag.Int("depth", 4, "the maximum depth")
+	flag.Parse()
+
+	maxDepth = *maxDepthPtr
+
+	args := flag.Args()
+	if len(args) > 0 {
+		rootPath = args[0]
+	} else {
+		rootPath = "." // default to the current directory
+	}
+
+	visitAndCheckGit(rootPath, 0)
+
+	// Print each repository only once
+	for _, repo := range repos {
+		fmt.Printf("In Folder [%s]: git present\n", repo.Path)
+		fmt.Println("Local Changes:", repo.LocalChanges)
+		fmt.Println("Remote Changes:", repo.RemoteChanges)
+	}
+}
+
 func getSignersFromAgent() ([]ssh.Signer, error) {
 	socket := os.Getenv("SSH_AUTH_SOCK")
 	conn, err := net.Dial("unix", socket)
@@ -169,28 +192,5 @@ func visitAndCheckGit(path string, depth int) {
 		if f.Type().IsDir() && f.Type()&os.ModeSymlink != os.ModeSymlink {
 			visitAndCheckGit(filepath.Join(path, f.Name()), depth+1)
 		}
-	}
-}
-
-func main() {
-	maxDepthPtr := flag.Int("depth", 4, "the maximum depth")
-	flag.Parse()
-
-	maxDepth = *maxDepthPtr
-
-	args := flag.Args()
-	if len(args) > 0 {
-		rootPath = args[0]
-	} else {
-		rootPath = "." // default to the current directory
-	}
-
-	visitAndCheckGit(rootPath, 0)
-
-	// Print each repository only once
-	for _, repo := range repos {
-		fmt.Printf("In Folder [%s]: git present\n", repo.Path)
-		fmt.Println("Local Changes:", repo.LocalChanges)
-		fmt.Println("Remote Changes:", repo.RemoteChanges)
 	}
 }
