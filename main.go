@@ -27,10 +27,17 @@ type repoStatus struct {
 var maxDepth int
 var repos []repoStatus
 var rootPath string // global rootPath variable
-
+var version = "0.0.9"
 func main() {
 	maxDepthPtr := flag.Int("depth", 4, "the maximum depth")
+	var versionFlag bool
+	flag.BoolVar(&versionFlag, "v", false, "print version information")
 	flag.Parse()
+
+	if versionFlag {
+		fmt.Printf("Version: %s\n", version)
+		os.Exit(0)
+	}
 
 	maxDepth = *maxDepthPtr
 
