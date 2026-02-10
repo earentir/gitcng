@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/go-git/go-git v4.7.0+incompatible
-	github.com/go-git/go-git/v5 v5.14.0
+	github.com/go-git/go-git/v5 v5.16.5
 	golang.org/x/crypto v0.45.0
 )
 
