@@ -6,7 +6,8 @@ require (
 	github.com/go-git/go-git/v5 v5.19.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.52.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
