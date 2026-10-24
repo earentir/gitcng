@@ -37,7 +37,7 @@ type repoStatus struct {
 }
 
 var (
-	appVersion      = "0.0.15"
+	appVersion      = "0.0.17"
 	maxDepth        int
 	showAll         bool
 	fetchTimeoutSec int
