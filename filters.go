@@ -82,7 +82,7 @@ func filterRepos(repos []repoStatus, metric string) []repoStatus {
 	return out
 }
 
-func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string) []repoStatus {
+func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string, includePullNotes bool) []repoStatus {
 	if onlyMetric != "" {
 		return filterRepos(repos, onlyMetric)
 	}
@@ -91,7 +91,7 @@ func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string) []repo
 	}
 	var out []repoStatus
 	for _, r := range repos {
-		if r.hasChanges() {
+		if r.hasChanges() || (includePullNotes && (r.PullNote != "" || r.PushNote != "")) {
 			out = append(out, r)
 		}
 	}

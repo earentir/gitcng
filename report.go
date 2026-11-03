@@ -14,7 +14,7 @@ import (
 
 const reportTimeLayout = "2006-01-02 15:04"
 
-const metricsSep = " | "
+const metricsSep = "   "
 
 const (
 	ansiReset = "\033[0m"
@@ -129,6 +129,52 @@ func formatReportTime(t time.Time) string {
 	return t.Local().Format(reportTimeLayout)
 }
 
+func formatPushNote(r repoStatus) string {
+	if r.PushNote == "" {
+		return ""
+	}
+	note := r.PushNote
+	switch r.PushOutcome {
+	case pushSkipped:
+		note = colourWarn(note)
+	case pushFailed:
+		note = colourErr(note)
+	}
+	return note
+}
+
+func rowPushLine(r repoStatus, pathCol int) string {
+	note := formatPushNote(r)
+	if note == "" {
+		return ""
+	}
+	indent := strings.Repeat(" ", pathCol+len(metricsSep))
+	return indent + note
+}
+
+func formatPullNote(r repoStatus) string {
+	if r.PullNote == "" {
+		return ""
+	}
+	note := r.PullNote
+	switch r.PullOutcome {
+	case pullSkipped:
+		note = colourWarn(note)
+	case pullFailed:
+		note = colourErr(note)
+	}
+	return note
+}
+
+func rowPullLine(r repoStatus, pathCol int) string {
+	note := formatPullNote(r)
+	if note == "" {
+		return ""
+	}
+	indent := strings.Repeat(" ", pathCol+len(metricsSep))
+	return indent + note
+}
+
 func printReport(w io.Writer, rows []repoStatus) {
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No repositories with local or remote changes")
@@ -179,6 +225,12 @@ func printReport(w io.Writer, rows []repoStatus) {
 
 		if reportCompact {
 			line := formatRowCompact(r, path, localW, remoteW, conflictW)
+			if note := formatPullNote(r); note != "" {
+				line += " | " + note
+			}
+			if note := formatPushNote(r); note != "" {
+				line += " | " + note
+			}
 			fmt.Fprintln(w, trimVisible(line, cols))
 			continue
 		}
@@ -194,6 +246,13 @@ func printReport(w io.Writer, rows []repoStatus) {
 
 		line2 := rowLine2(r, pathCol)
 		fmt.Fprintln(w, trimVisible(line2, cols))
+
+		if pullLine := rowPullLine(r, pathCol); pullLine != "" {
+			fmt.Fprintln(w, trimVisible(pullLine, cols))
+		}
+		if pushLine := rowPushLine(r, pathCol); pushLine != "" {
+			fmt.Fprintln(w, trimVisible(pushLine, cols))
+		}
 		if i < len(rows)-1 {
 			fmt.Fprintln(w)
 		}
