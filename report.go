@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -29,10 +28,6 @@ func termCols() int {
 		w, _, err := term.GetSize(fd)
 		if err == nil && w > 0 {
 			return w
-		}
-		ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
-		if err == nil && ws.Col > 0 {
-			return int(ws.Col)
 		}
 	}
 	return 80
