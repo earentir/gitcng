@@ -21,3 +21,4 @@
 bin/*
 go.work
 gitcng
+builds/
