@@ -22,7 +22,7 @@ import (
 	xknownhosts "golang.org/x/crypto/ssh/knownhosts"
 )
 
-const defaultNetworkTimeoutSec = 3
+const defaultNetworkTimeoutSec = 5
 
 type repoStatus struct {
 	Path       string
@@ -443,7 +443,7 @@ METRIC for --count and --only:
 	rootCmd.Flags().BoolVar(&pullAll, "pull", false, "git pull: fast-forward from origin when only remote commits are pending (clean working tree)")
 	rootCmd.Flags().BoolVar(&mergeOnPull, "merge", false, "with --pull: merge local and remote commits when they do not conflict, then push to origin")
 	rootCmd.Flags().BoolVar(&pushAll, "push", false, "git push: push local commits to origin when the working tree is clean and nothing is left to pull")
-	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 3)")
+	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 5)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
 
 	registerCompletions(rootCmd)

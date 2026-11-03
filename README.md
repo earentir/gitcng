@@ -87,7 +87,7 @@ Print matching **paths**, one per line (respects `--only`; default filter unless
 | `--all` | Include repos with nothing pending |
 | `--compact` | Single-line rows |
 | `--colour auto\|always\|never` | ANSI highlighting (`NO_COLOR` / `NO_COLOUR`, `FORCE_COLOR` / `FORCE_COLOUR`) |
-| `--fetch-timeout N` | Per-fetch / SSH dial cap in seconds (default 3) |
+| `--fetch-timeout N` | Per-fetch / SSH dial cap in seconds (default 5) |
 | `-q`, `--quiet` | No stderr progress |
 
 ## Exit codes
