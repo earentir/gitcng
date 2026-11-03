@@ -30,6 +30,7 @@ type repoStatus struct {
 	DirtyFiles int
 	Ahead      int
 	Behind     int
+	Conflicts  int
 	LastCommit time.Time
 	LastPush   time.Time
 	HasPush    bool
@@ -37,9 +38,14 @@ type repoStatus struct {
 }
 
 var (
-	appVersion      = "0.0.17"
+	appVersion      = "0.0.19"
 	maxDepth        int
 	showAll         bool
+	reportCompact   bool
+	countMetric     string
+	onlyMetric      string
+	listPaths       bool
+	quietOutput     bool
 	fetchTimeoutSec int
 	repos           []repoStatus
 
@@ -194,6 +200,7 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 		return st
 	}
 	st.DirtyFiles = countChanges(status)
+	st.Conflicts = countConflicts(status)
 
 	headRef, err := r.Head()
 	if err != nil {
@@ -308,10 +315,35 @@ func visitAndCheckGit(path string, depth int) error {
 	return nil
 }
 
+func scanExitCode(repos []repoStatus) int {
+	for _, r := range repos {
+		if len(r.Errs) > 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
 func runScan(root string) int {
 	repos = nil
+	if countMetric != "" && onlyMetric != "" {
+		fmt.Fprintf(os.Stderr, "error: use either --count or --only, not both\n")
+		return 2
+	}
+	var err error
+	countMetric, err = normalizeMetric(countMetric)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	onlyMetric, err = normalizeMetric(onlyMetric)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+
 	initSSHAgent()
-	if err := initFilteredKnownHosts(); err != nil {
+	if err := initFilteredKnownHosts(); err != nil && !quietOutput {
 		fmt.Fprintf(os.Stderr, "warning: %s (SSH fetch may fail)\n", userError("known_hosts", err))
 	}
 
@@ -322,19 +354,58 @@ func runScan(root string) int {
 	}
 
 	clearStatus()
-	printReport(os.Stdout, repos, showAll)
-	for _, r := range repos {
-		if len(r.Errs) > 0 {
-			return 1
-		}
+	rows := reposForDisplay(repos, showAll, onlyMetric)
+
+	if countMetric != "" {
+		printCountReport(os.Stdout, repos, countMetric, quietOutput)
+		return scanExitCode(repos)
 	}
-	return 0
+
+	if listPaths {
+		for _, r := range rows {
+			fmt.Println(r.Path)
+		}
+		return scanExitCode(repos)
+	}
+
+	printReport(os.Stdout, rows)
+	return scanExitCode(repos)
 }
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:     "gitcng [path]",
-		Short:   "Check for git repositories in a directory tree",
+		Use:   "gitcng [path]",
+		Short: "Scan a tree of git repos and print local/remote status",
+		Long: strings.TrimSpace(`
+Scan a directory tree for git repositories and print local/remote status.
+
+Default output is a two-line block per repo (Conflicts, Diverged, Commit/Push on line 2).
+Use --compact for one line per repo. Use --all to include clean repos.
+
+Script mode:
+  gitcng --count remote ..           # summary + table
+  gitcng -q --count remote ..        # one repo: Remote count only; several: path + Remote per line
+  gitcng --only ahead --list ..      # paths of repos with unpushed commits
+
+METRIC for --count and --only:
+  uncommitted, local — dirty files
+  remote             — commits to pull from origin
+  ahead              — commits to push
+  conflicts          — merge conflict files
+  diverged           — ahead and behind at once
+  errors             — fetch/auth/etc.
+  attention          — anything that needs action
+  repos              — every repo found
+
+--count and --only cannot be used together.
+`),
+		Example: strings.TrimSpace(`
+  gitcng ../web
+  gitcng --compact --all ..
+  gitcng -q --count uncommitted ../web
+  if [ "$(gitcng -q --count remote ..)" -gt 0 ]; then git pull; fi
+  gitcng --only errors --list ..
+`),
 		Version: appVersion,
 		Args:    cobra.MaximumNArgs(1),
 		Run: func(_ *cobra.Command, args []string) {
@@ -348,8 +419,17 @@ func main() {
 
 	rootCmd.Flags().IntVar(&maxDepth, "depth", 4, "the maximum depth")
 	rootCmd.Flags().BoolVar(&showAll, "all", false, "list every repository, including ones with no local or remote changes")
+	rootCmd.Flags().BoolVar(&reportCompact, "compact", false, "print each repository on one line (default is two lines with spacing)")
+	rootCmd.Flags().StringVar(&countMetric, "count", "",
+		"count repos matching METRIC and list each with its value; -q: one repo prints value only, several print path+value; METRIC: "+metricNamesListed)
+	rootCmd.Flags().StringVar(&onlyMetric, "only", "",
+		"report only repos matching METRIC; METRIC is one of: "+metricNamesListed)
+	rootCmd.Flags().BoolVar(&listPaths, "list", false, "print matching repository paths, one per line")
+	rootCmd.Flags().BoolVarP(&quietOutput, "quiet", "q", false, "suppress scan progress on stderr")
 	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 3)")
-	rootCmd.Flags().StringVar(&colorMode, "color", "auto", "colorize output: auto, always, or never")
+	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
+
+	registerCompletions(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
