@@ -30,6 +30,16 @@ func countChanges(status git.Status) int {
 	return changes
 }
 
+func countConflicts(status git.Status) int {
+	n := 0
+	for _, s := range status {
+		if s.Staging == git.UpdatedButUnmerged || s.Worktree == git.UpdatedButUnmerged {
+			n++
+		}
+	}
+	return n
+}
+
 func countAheadBehind(r *git.Repository, headRef, remoteRef *plumbing.Reference) (ahead, behind int, err error) {
 	if headRef.Hash() == remoteRef.Hash() {
 		return 0, 0, nil
