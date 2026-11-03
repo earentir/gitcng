@@ -35,10 +35,14 @@ type repoStatus struct {
 	LastPush   time.Time
 	HasPush    bool
 	Errs       []string
+	PullNote    string
+	PullOutcome pullOutcome
+	PushNote    string
+	PushOutcome pushOutcome
 }
 
 var (
-	appVersion      = "0.0.19"
+	appVersion      = "0.0.23"
 	maxDepth        int
 	showAll         bool
 	reportCompact   bool
@@ -46,6 +50,9 @@ var (
 	onlyMetric      string
 	listPaths       bool
 	quietOutput     bool
+	pullAll         bool
+	mergeOnPull     bool
+	pushAll         bool
 	fetchTimeoutSec int
 	repos           []repoStatus
 
@@ -230,27 +237,18 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 
 	tryFetch := func() {
 		opts := &git.FetchOptions{RemoteName: "origin"}
-		if isSSHRemoteURL(originURL) {
-			if !sshAgentOK {
-				st.Errs = append(st.Errs, userError("ssh-agent", sshAgentErr))
-				return
-			}
-			auth, err := gogitssh.NewSSHAgentAuth(sshUsernameFromURL(originURL))
-			if err != nil {
-				st.Errs = append(st.Errs, userError("auth", err))
-				return
-			}
-			if hostKeyCb == nil {
-				st.Errs = append(st.Errs, "known_hosts: no host key callback")
-				return
-			}
-			auth.HostKeyCallback = hostKeyCb
+		auth, err := authForOriginURL(originURL)
+		if err != nil {
+			st.Errs = append(st.Errs, userError("auth", err))
+			return
+		}
+		if auth != nil {
 			opts.Auth = &sshAuthTimeout{inner: auth, timeout: networkTimeout()}
 		}
 		writeStatus("Fetching", path)
 		ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
 		defer cancel()
-		err := r.FetchContext(ctx, opts)
+		err = r.FetchContext(ctx, opts)
 		if err != nil && err != git.NoErrAlreadyUpToDate {
 			st.Errs = append(st.Errs, userError("fetch", err))
 		}
@@ -330,6 +328,14 @@ func runScan(root string) int {
 		fmt.Fprintf(os.Stderr, "error: use either --count or --only, not both\n")
 		return 2
 	}
+	if mergeOnPull && !pullAll {
+		fmt.Fprintf(os.Stderr, "error: --merge requires --pull\n")
+		return 2
+	}
+	if (pullAll || pushAll) && (countMetric != "" || listPaths) {
+		fmt.Fprintf(os.Stderr, "error: --pull/--push cannot be used with --count or --list\n")
+		return 2
+	}
 	var err error
 	countMetric, err = normalizeMetric(countMetric)
 	if err != nil {
@@ -354,7 +360,15 @@ func runScan(root string) int {
 	}
 
 	clearStatus()
-	rows := reposForDisplay(repos, showAll, onlyMetric)
+	if pullAll {
+		applyPullAll(mergeOnPull)
+		clearStatus()
+	}
+	if pushAll {
+		applyPushAll()
+		clearStatus()
+	}
+	rows := reposForDisplay(repos, showAll, onlyMetric, pullAll || pushAll)
 
 	if countMetric != "" {
 		printCountReport(os.Stdout, repos, countMetric, quietOutput)
@@ -426,6 +440,9 @@ METRIC for --count and --only:
 		"report only repos matching METRIC; METRIC is one of: "+metricNamesListed)
 	rootCmd.Flags().BoolVar(&listPaths, "list", false, "print matching repository paths, one per line")
 	rootCmd.Flags().BoolVarP(&quietOutput, "quiet", "q", false, "suppress scan progress on stderr")
+	rootCmd.Flags().BoolVar(&pullAll, "pull", false, "git pull: fast-forward from origin when only remote commits are pending (clean working tree)")
+	rootCmd.Flags().BoolVar(&mergeOnPull, "merge", false, "with --pull: merge local and remote commits when they do not conflict, then push to origin")
+	rootCmd.Flags().BoolVar(&pushAll, "push", false, "git push: push local commits to origin when the working tree is clean and nothing is left to pull")
 	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 3)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
 
