@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -210,6 +211,22 @@ func rowPullLine(r repoStatus, pathCol int) string {
 	return indent + note
 }
 
+func repoDisplayPath(path string) string {
+	if filepath.Clean(path) == "." {
+		if wd, err := os.Getwd(); err == nil {
+			return filepath.Base(wd)
+		}
+	}
+	return path
+}
+
+func repoDisplayName(r repoStatus) string {
+	if r.RepoName != "" {
+		return r.RepoName
+	}
+	return repoDisplayPath(r.Path)
+}
+
 func printReport(w io.Writer, rows []repoStatus) {
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No repositories with local or remote changes")
@@ -220,7 +237,8 @@ func printReport(w io.Writer, rows []repoStatus) {
 	localW, remoteW, conflictW, aheadW := 1, 1, 1, 1
 	maxPath := 0
 	for _, r := range rows {
-		if n := len(r.Path); n > maxPath {
+		shown := repoDisplayName(r)
+		if n := len(shown); n > maxPath {
 			maxPath = n
 		}
 		if r.LastReleaseTag != "" {
@@ -261,13 +279,14 @@ func printReport(w io.Writer, rows []repoStatus) {
 	}
 
 	for i, r := range rows {
-		path := fitPath(r.Path, pathCol)
+		shownPath := repoDisplayName(r)
+		path := fitPath(shownPath, pathCol)
 		if visibleLen(path)+suffixLen > cols {
 			allow := cols - suffixLen
 			if allow < 1 {
 				allow = 1
 			}
-			path = trimRunes(r.Path, allow)
+			path = trimRunes(shownPath, allow)
 		}
 
 		if reportCompact {
@@ -296,6 +315,10 @@ func printReport(w io.Writer, rows []repoStatus) {
 
 		line2 := rowLine2(r, pathCol)
 		fmt.Fprintln(w, trimVisible(line2, cols))
+
+		if sinceLine := rowSinceReleaseLine(r, pathCol); sinceLine != "" {
+			fmt.Fprintln(w, trimVisible(sinceLine, cols))
+		}
 
 		for _, diffLine := range rowReleaseDiffLines(r, pathCol) {
 			fmt.Fprintln(w, trimVisible(diffLine, cols))
@@ -376,22 +399,27 @@ func rowLine2(r repoStatus, pathCol int) string {
 		push = formatReportTime(r.LastPush)
 	}
 	line := indent + fmt.Sprintf("Commit: %s | Push: %s", commit, push)
-	if part := formatSinceRelease(r); part != "" {
-		line += " | " + part
+	if r.HasLastRelease {
+		line += fmt.Sprintf(" | Last Release: %s", formatReportTime(r.LastRelease))
 	}
 	return line
 }
 
-func formatSinceRelease(r repoStatus) string {
-	if r.LastReleaseTag == "" || r.SinceRelease < 0 {
+func rowSinceReleaseLine(r repoStatus, pathCol int) string {
+	if !r.HasLastRelease || r.SinceRelease < 0 {
 		return ""
 	}
+	indent := strings.Repeat(" ", pathCol+len(metricsSep))
+	return indent + formatSinceLastRelease(r)
+}
+
+func formatSinceLastRelease(r repoStatus) string {
 	commitWord := "commits"
 	if r.SinceRelease == 1 {
 		commitWord = "commit"
 	}
 	n := colourNum(digitWidth(r.SinceRelease), r.SinceRelease, colourWarn)
-	part := fmt.Sprintf("Since %s: %s %s", r.LastReleaseTag, n, commitWord)
+	part := fmt.Sprintf("Since last release: %s %s", n, commitWord)
 	if r.SinceRelease > 0 && r.SinceReleaseFiles > 0 {
 		fw := colourNum(digitWidth(r.SinceReleaseFiles), r.SinceReleaseFiles, colourWarn)
 		fileWord := "files"
@@ -439,8 +467,11 @@ func formatRowCompact(r repoStatus, path string, localW, remoteW, conflictW, ahe
 	line := path + formatRowLine0(r, localW, remoteW) + " | " +
 		formatRowLine1Metrics(r, conflictW, aheadW) +
 		fmt.Sprintf(" | Commit: %s | Push: %s", commit, push)
-	if part := formatSinceRelease(r); part != "" {
-		line += " | " + part
+	if r.HasLastRelease {
+		line += fmt.Sprintf(" | Last Release: %s", formatReportTime(r.LastRelease))
+	}
+	if r.HasLastRelease && r.SinceRelease >= 0 {
+		line += " | " + formatSinceLastRelease(r)
 	}
 	if len(r.Errs) > 0 {
 		line += " | " + colourErr(r.Errs[0])

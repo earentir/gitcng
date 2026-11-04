@@ -21,10 +21,11 @@ import (
 	xknownhosts "golang.org/x/crypto/ssh/knownhosts"
 )
 
-const defaultNetworkTimeoutSec = 5
+const defaultNetworkTimeoutSec = 10
 
 type repoStatus struct {
 	Path       string
+	RepoName   string // origin project name for display; else derived from path
 	Branch     string
 	DirtyFiles int
 	Ahead      int
@@ -40,6 +41,8 @@ type repoStatus struct {
 	PushOutcome pushOutcome
 
 	LastReleaseTag    string
+	LastRelease       time.Time
+	HasLastRelease    bool
 	SinceRelease      int // commits after LastReleaseTag; -1 if none/unknown
 	SinceReleaseFiles int
 	ReleaseCommits    []releaseCommit
@@ -243,6 +246,7 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 		enrichRelease(r, headRef.Hash(), &st, releaseDiff)
 		return st
 	}
+	st.RepoName = originRepoName(originURL)
 
 	tryFetch := func() {
 		writeStatus("Fetching", path)
@@ -415,7 +419,7 @@ METRIC for --count and --only:
 	rootCmd.Flags().BoolVar(&pullAll, "pull", false, "git pull: fast-forward from origin when only remote commits are pending (clean working tree)")
 	rootCmd.Flags().BoolVar(&mergeOnPull, "merge", false, "with --pull: merge local and remote commits when they do not conflict, then push to origin")
 	rootCmd.Flags().BoolVar(&pushAll, "push", false, "git push: push local commits to origin when the working tree is clean and nothing is left to pull")
-	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 5)")
+	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 10)")
 	rootCmd.Flags().BoolVar(&releaseDiff, "release-diff", false, "list commits and changed files since the latest release tag (semver, else newest tag by date)")
 	rootCmd.Flags().IntVar(&parallelJobs, "jobs", 0, "check repositories in parallel (0 = auto, up to 16 workers)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")

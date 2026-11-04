@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -111,6 +112,34 @@ func originRemoteURL(remotes []*git.Remote) (url string, hasOrigin bool) {
 		return urls[0], true
 	}
 	return "", false
+}
+
+// originRepoName is the repository slug from origin (e.g. pkg-auth from …/pkg-auth.git).
+func originRepoName(originURL string) string {
+	u := strings.TrimSpace(originURL)
+	if u == "" {
+		return ""
+	}
+	if strings.HasSuffix(u, ".git") {
+		u = u[:len(u)-4]
+	}
+	if parsed, err := url.Parse(u); err == nil && parsed.Path != "" && parsed.Host != "" {
+		base := path.Base(strings.Trim(parsed.Path, "/"))
+		if base != "" && base != "." {
+			return base
+		}
+	}
+	if i := strings.LastIndex(u, "/"); i >= 0 {
+		return u[i+1:]
+	}
+	if i := strings.LastIndex(u, ":"); i >= 0 {
+		rest := u[i+1:]
+		if j := strings.LastIndex(rest, "/"); j >= 0 {
+			return rest[j+1:]
+		}
+		return rest
+	}
+	return ""
 }
 
 func isSSHRemoteURL(remoteURL string) bool {

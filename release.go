@@ -30,7 +30,10 @@ func enrichRelease(r *git.Repository, tip plumbing.Hash, st *repoStatus, detaile
 		st.SinceRelease = -1
 		return
 	}
-	st.LastReleaseTag = tagName
+	if err := setReleaseTagMeta(r, st, tagName, tagHash); err != nil {
+		st.Errs = append(st.Errs, userError("release", err))
+		return
+	}
 
 	if tip == tagHash {
 		st.SinceRelease = 0
@@ -269,4 +272,25 @@ func changedPathsBetween(r *git.Repository, older, newer plumbing.Hash) ([]strin
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func setReleaseTagMeta(r *git.Repository, st *repoStatus, tagName string, tagHash plumbing.Hash) error {
+	st.LastReleaseTag = tagName
+	ref, err := r.Reference(plumbing.NewTagReferenceName(tagName), true)
+	if err == nil {
+		when, err := tagTime(r, ref, tagHash)
+		if err != nil {
+			return err
+		}
+		st.LastRelease = when
+		st.HasLastRelease = true
+		return nil
+	}
+	when, err := commitTime(r, tagHash)
+	if err != nil {
+		return err
+	}
+	st.LastRelease = when
+	st.HasLastRelease = true
+	return nil
 }
