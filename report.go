@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -22,6 +23,32 @@ const (
 )
 
 var ansiStrip = regexp.MustCompile("\033\\[[0-9;]*m")
+
+var (
+	statusMu            sync.Mutex
+	scanProgressTotal   int
+	scanProgressStarted int
+)
+
+func setScanProgress(total int) {
+	statusMu.Lock()
+	scanProgressTotal = total
+	scanProgressStarted = 0
+	statusMu.Unlock()
+}
+
+func clearScanProgress() {
+	statusMu.Lock()
+	scanProgressTotal = 0
+	scanProgressStarted = 0
+	statusMu.Unlock()
+}
+
+func markRepoCheckStarted() {
+	statusMu.Lock()
+	scanProgressStarted++
+	statusMu.Unlock()
+}
 
 func termCols() int {
 	for _, fd := range []int{int(os.Stdout.Fd()), int(os.Stderr.Fd())} {
@@ -93,7 +120,20 @@ func writeStatus(action, path string) {
 	if quietOutput || !stderrIsTTY() {
 		return
 	}
-	msg := trimRunes(action+" "+path, termCols()-1)
+	statusMu.Lock()
+	defer statusMu.Unlock()
+	prefix := ""
+	if scanProgressTotal > 1 {
+		n := scanProgressStarted
+		if n < 1 {
+			n = 1
+		}
+		if n > scanProgressTotal {
+			n = scanProgressTotal
+		}
+		prefix = fmt.Sprintf("[%d/%d] ", n, scanProgressTotal)
+	}
+	msg := trimRunes(prefix+action+" "+path, termCols()-1)
 	fmt.Fprintf(os.Stderr, "\r%s\033[K", msg)
 }
 
@@ -106,7 +146,7 @@ func clearStatus() {
 
 func (r repoStatus) hasChanges() bool {
 	return r.DirtyFiles > 0 || r.Ahead > 0 || r.Behind > 0 || r.Conflicts > 0 ||
-		(r.Ahead > 0 && r.Behind > 0) || len(r.Errs) > 0
+		(r.Ahead > 0 && r.Behind > 0) || len(r.Errs) > 0 || r.SinceRelease > 0
 }
 
 func (r repoStatus) uncommitted() bool {
@@ -177,11 +217,16 @@ func printReport(w io.Writer, rows []repoStatus) {
 	}
 
 	cols := termCols()
-	localW, remoteW, conflictW := 1, 1, 1
+	localW, remoteW, conflictW, aheadW := 1, 1, 1, 1
 	maxPath := 0
 	for _, r := range rows {
 		if n := len(r.Path); n > maxPath {
 			maxPath = n
+		}
+		if r.LastReleaseTag != "" {
+			if n := len(r.LastReleaseTag) + 1; n > maxPath {
+				maxPath = n
+			}
 		}
 		if n := digitWidth(r.DirtyFiles); n > localW {
 			localW = n
@@ -192,11 +237,18 @@ func printReport(w io.Writer, rows []repoStatus) {
 		if n := digitWidth(r.Conflicts); n > conflictW {
 			conflictW = n
 		}
+		if n := digitWidth(r.Ahead); n > aheadW {
+			aheadW = n
+		}
 	}
 
-	line1SuffixLen := visibleLen(rowLine1Plain(repoStatus{}, localW, remoteW, conflictW, true))
-	compactSuffixLen := visibleLen(compactMetricsPlain(localW, remoteW, conflictW))
-	suffixLen := line1SuffixLen
+	line0SuffixLen := visibleLen(rowLine0Plain(localW, remoteW, true))
+	line1SuffixLen := visibleLen(rowLine1Plain(conflictW, aheadW, true))
+	compactSuffixLen := visibleLen(compactMetricsPlain(localW, remoteW, conflictW, aheadW))
+	suffixLen := line0SuffixLen
+	if line1SuffixLen > suffixLen {
+		suffixLen = line1SuffixLen
+	}
 	if reportCompact {
 		suffixLen = compactSuffixLen
 	}
@@ -219,7 +271,7 @@ func printReport(w io.Writer, rows []repoStatus) {
 		}
 
 		if reportCompact {
-			line := formatRowCompact(r, path, localW, remoteW, conflictW)
+			line := formatRowCompact(r, path, localW, remoteW, conflictW, aheadW)
 			if note := formatPullNote(r); note != "" {
 				line += " | " + note
 			}
@@ -227,21 +279,27 @@ func printReport(w io.Writer, rows []repoStatus) {
 				line += " | " + note
 			}
 			fmt.Fprintln(w, trimVisible(line, cols))
+			for _, diffLine := range rowReleaseDiffLines(r, pathCol) {
+				fmt.Fprintln(w, trimVisible(diffLine, cols))
+			}
+			if i < len(rows)-1 {
+				fmt.Fprintln(w)
+			}
 			continue
 		}
 
-		line1 := path + formatRowLine1(r, localW, remoteW, conflictW)
-		if r.Ahead > 0 {
-			line1 += fmt.Sprintf(" | Ahead: %s", colourNum(digitWidth(r.Ahead), r.Ahead, colourWarn))
-		}
-		if len(r.Errs) > 0 {
-			line1 += " | " + colourErr(r.Errs[0])
-		}
+		line0 := rowLine0(r, path, localW, remoteW)
+		fmt.Fprintln(w, trimVisible(line0, cols))
+
+		line1 := rowLine1(r, pathCol, conflictW, aheadW)
 		fmt.Fprintln(w, trimVisible(line1, cols))
 
 		line2 := rowLine2(r, pathCol)
 		fmt.Fprintln(w, trimVisible(line2, cols))
 
+		for _, diffLine := range rowReleaseDiffLines(r, pathCol) {
+			fmt.Fprintln(w, trimVisible(diffLine, cols))
+		}
 		if pullLine := rowPullLine(r, pathCol); pullLine != "" {
 			fmt.Fprintln(w, trimVisible(pullLine, cols))
 		}
@@ -254,35 +312,59 @@ func printReport(w io.Writer, rows []repoStatus) {
 	}
 }
 
-func rowLine1Plain(r repoStatus, localW, remoteW, conflictW int, sizing bool) string {
-	local, remote, conflicts := 0, 0, 0
-	uncomm, diverged := " no", " no"
-	if !sizing {
-		local, remote, conflicts = r.DirtyFiles, r.Behind, r.Conflicts
-		if r.uncommitted() {
-			uncomm = "yes"
-		}
-		if r.diverged() {
-			diverged = "yes"
-		}
-	} else {
-		uncomm, diverged = "yes", "yes"
+func rowLine0Plain(localW, remoteW int, sizing bool) string {
+	uncomm := " no"
+	if sizing {
+		uncomm = "yes"
 	}
-	return fmt.Sprintf("%sLocal: %*d | Remote: %*d | Uncommitted: %3s | Conflicts: %*d | Diverged: %3s",
-		metricsSep, localW, local, remoteW, remote, uncomm, conflictW, conflicts, diverged)
+	return fmt.Sprintf("%sLocal: %*d | Remote: %*d | Uncommitted: %3s",
+		metricsSep, localW, 0, remoteW, 0, uncomm)
 }
 
-func formatRowLine1(r repoStatus, localW, remoteW, conflictW int) string {
-	localNum := colourNum(localW, r.DirtyFiles, colourWarn)
-	remoteNum := colourNum(remoteW, r.Behind, colourWarn)
-	conflictNum := colourNum(conflictW, r.Conflicts, colourErr)
+func rowLine0(r repoStatus, path string, localW, remoteW int) string {
+	line := path + formatRowLine0(r, localW, remoteW)
+	if len(r.Errs) > 0 {
+		line += " | " + colourErr(r.Errs[0])
+	}
+	return line
+}
 
-	return fmt.Sprintf("%sLocal: %s | Remote: %s | Uncommitted: %s | Conflicts: %s | Diverged: %s",
+func formatRowLine0(r repoStatus, localW, remoteW int) string {
+	return fmt.Sprintf("%sLocal: %s | Remote: %s | Uncommitted: %s",
 		metricsSep,
-		localNum, remoteNum,
+		colourNum(localW, r.DirtyFiles, colourWarn),
+		colourNum(remoteW, r.Behind, colourWarn),
 		colourYesNo(r.uncommitted()),
-		conflictNum,
+	)
+}
+
+func rowLine1Plain(conflictW, aheadW int, sizing bool) string {
+	div := " no"
+	if sizing {
+		div = "yes"
+	}
+	return fmt.Sprintf("%sConflicts: %*d | Diverged: %3s | Ahead: %*d",
+		metricsSep, conflictW, 0, div, aheadW, 0)
+}
+
+func rowLine1(r repoStatus, pathCol, conflictW, aheadW int) string {
+	prefix := strings.Repeat(" ", pathCol)
+	if r.LastReleaseTag != "" {
+		inner := pathCol - 1
+		if inner < 1 {
+			inner = 1
+		}
+		prefix = " " + fitPath(r.LastReleaseTag, inner)
+	}
+	return prefix + formatRowLine1Metrics(r, conflictW, aheadW)
+}
+
+func formatRowLine1Metrics(r repoStatus, conflictW, aheadW int) string {
+	return fmt.Sprintf("%sConflicts: %s | Diverged: %s | Ahead: %s",
+		metricsSep,
+		colourNum(conflictW, r.Conflicts, colourErr),
 		colourYesNo(r.diverged()),
+		colourNum(aheadW, r.Ahead, colourWarn),
 	)
 }
 
@@ -293,26 +375,72 @@ func rowLine2(r repoStatus, pathCol int) string {
 	if r.HasPush {
 		push = formatReportTime(r.LastPush)
 	}
-	return indent + fmt.Sprintf("Commit: %s | Push: %s", commit, push)
+	line := indent + fmt.Sprintf("Commit: %s | Push: %s", commit, push)
+	if part := formatSinceRelease(r); part != "" {
+		line += " | " + part
+	}
+	return line
 }
 
-func compactMetricsPlain(localW, remoteW, conflictW int) string {
-	sample := repoStatus{HasPush: true, DirtyFiles: 1, Behind: 1, Conflicts: 1}
+func formatSinceRelease(r repoStatus) string {
+	if r.LastReleaseTag == "" || r.SinceRelease < 0 {
+		return ""
+	}
+	commitWord := "commits"
+	if r.SinceRelease == 1 {
+		commitWord = "commit"
+	}
+	n := colourNum(digitWidth(r.SinceRelease), r.SinceRelease, colourWarn)
+	part := fmt.Sprintf("Since %s: %s %s", r.LastReleaseTag, n, commitWord)
+	if r.SinceRelease > 0 && r.SinceReleaseFiles > 0 {
+		fw := colourNum(digitWidth(r.SinceReleaseFiles), r.SinceReleaseFiles, colourWarn)
+		fileWord := "files"
+		if r.SinceReleaseFiles == 1 {
+			fileWord = "file"
+		}
+		part += fmt.Sprintf(", %s %s", fw, fileWord)
+	}
+	return part
+}
+
+func rowReleaseDiffLines(r repoStatus, pathCol int) []string {
+	if !releaseDiff || r.LastReleaseTag == "" || r.SinceRelease <= 0 {
+		return nil
+	}
+	indent := strings.Repeat(" ", pathCol+len(metricsSep))
+	var lines []string
+	for _, c := range r.ReleaseCommits {
+		lines = append(lines, indent+fmt.Sprintf("%s  %s  %s",
+			c.Short, formatReportTime(c.When), c.Subject))
+	}
+	if len(r.ReleasePaths) == 0 {
+		return lines
+	}
+	lines = append(lines, indent+fmt.Sprintf("files changed (%d):", len(r.ReleasePaths)))
+	for _, p := range r.ReleasePaths {
+		lines = append(lines, indent+"  "+p)
+	}
+	return lines
+}
+
+func compactMetricsPlain(localW, remoteW, conflictW, aheadW int) string {
 	ts := formatReportTime(time.Now())
-	return formatRowLine1(sample, localW, remoteW, conflictW) +
+	return rowLine0Plain(localW, remoteW, true) + " | " +
+		rowLine1Plain(conflictW, aheadW, true) +
 		fmt.Sprintf(" | Commit: %s | Push: %s", ts, ts)
 }
 
-func formatRowCompact(r repoStatus, path string, localW, remoteW, conflictW int) string {
+func formatRowCompact(r repoStatus, path string, localW, remoteW, conflictW, aheadW int) string {
 	commit := formatReportTime(r.LastCommit)
 	push := "-"
 	if r.HasPush {
 		push = formatReportTime(r.LastPush)
 	}
-	line := path + formatRowLine1(r, localW, remoteW, conflictW) +
+	line := path + formatRowLine0(r, localW, remoteW) + " | " +
+		formatRowLine1Metrics(r, conflictW, aheadW) +
 		fmt.Sprintf(" | Commit: %s | Push: %s", commit, push)
-	if r.Ahead > 0 {
-		line += fmt.Sprintf(" | Ahead: %s", colourNum(digitWidth(r.Ahead), r.Ahead, colourWarn))
+	if part := formatSinceRelease(r); part != "" {
+		line += " | " + part
 	}
 	if len(r.Errs) > 0 {
 		line += " | " + colourErr(r.Errs[0])

@@ -4,7 +4,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -39,10 +38,16 @@ type repoStatus struct {
 	PullOutcome pullOutcome
 	PushNote    string
 	PushOutcome pushOutcome
+
+	LastReleaseTag    string
+	SinceRelease      int // commits after LastReleaseTag; -1 if none/unknown
+	SinceReleaseFiles int
+	ReleaseCommits    []releaseCommit
+	ReleasePaths      []string
 }
 
 var (
-	appVersion      = "0.0.23"
+	appVersion      = "0.1.25"
 	maxDepth        int
 	showAll         bool
 	reportCompact   bool
@@ -54,6 +59,8 @@ var (
 	mergeOnPull     bool
 	pushAll         bool
 	fetchTimeoutSec int
+	releaseDiff     bool
+	parallelJobs    int
 	repos           []repoStatus
 
 	sshAgentOK  bool
@@ -228,29 +235,24 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 
 	originURL, hasOrigin := originRemoteURL(remotes)
 	if !hasOrigin {
+		enrichRelease(r, headRef.Hash(), &st, releaseDiff)
 		return st
 	}
 	if originURL == "" {
 		st.Errs = append(st.Errs, "origin has no URL")
+		enrichRelease(r, headRef.Hash(), &st, releaseDiff)
 		return st
 	}
 
 	tryFetch := func() {
-		opts := &git.FetchOptions{RemoteName: "origin"}
-		auth, err := authForOriginURL(originURL)
-		if err != nil {
-			st.Errs = append(st.Errs, userError("auth", err))
-			return
-		}
-		if auth != nil {
-			opts.Auth = &sshAuthTimeout{inner: auth, timeout: networkTimeout()}
-		}
 		writeStatus("Fetching", path)
-		ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
-		defer cancel()
-		err = r.FetchContext(ctx, opts)
+		err := fetchOrigin(r, originURL)
 		if err != nil && err != git.NoErrAlreadyUpToDate {
-			st.Errs = append(st.Errs, userError("fetch", err))
+			kind := "fetch"
+			if isOriginAuthError(err) {
+				kind = "auth"
+			}
+			st.Errs = append(st.Errs, userError(kind, err))
 		}
 	}
 	tryFetch()
@@ -258,6 +260,7 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 	remoteRef, err := r.Reference(plumbing.NewRemoteReferenceName("origin", st.Branch), true)
 	if err != nil {
 		st.Errs = append(st.Errs, originRefError(st.Branch, err))
+		enrichRelease(r, headRef.Hash(), &st, releaseDiff)
 		return st
 	}
 
@@ -265,6 +268,7 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 	ahead, behind, err := countAheadBehind(r, headRef, remoteRef)
 	if err != nil {
 		st.Errs = append(st.Errs, userError("compare", err))
+		enrichRelease(r, remoteRef.Hash(), &st, releaseDiff)
 		return st
 	}
 	st.Ahead = ahead
@@ -274,43 +278,9 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 		st.LastPush = t
 		st.HasPush = true
 	}
+
+	enrichRelease(r, remoteRef.Hash(), &st, releaseDiff)
 	return st
-}
-
-func visitAndCheckGit(path string, depth int) error {
-	if depth > maxDepth {
-		return nil
-	}
-
-	writeStatus("Visiting", path)
-
-	r, err := git.PlainOpen(path)
-	if err == nil {
-		writeStatus("Checking", path)
-		st := checkRepository(path, r)
-		repos = append(repos, st)
-		return nil
-	}
-
-	files, err := os.ReadDir(path)
-	if err != nil {
-		if depth == 0 {
-			return err
-		}
-		return nil
-	}
-
-	for _, f := range files {
-		if f.Name() == ".git" {
-			continue
-		}
-		if f.Type().IsDir() && f.Type()&os.ModeSymlink != os.ModeSymlink {
-			if err := visitAndCheckGit(filepath.Join(path, f.Name()), depth+1); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func scanExitCode(repos []repoStatus) int {
@@ -353,11 +323,13 @@ func runScan(root string) int {
 		fmt.Fprintf(os.Stderr, "warning: %s (SSH fetch may fail)\n", userError("known_hosts", err))
 	}
 
-	if err := visitAndCheckGit(root, 0); err != nil {
+	paths, err := collectGitRepoPaths(root, 0)
+	if err != nil {
 		clearStatus()
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 2
 	}
+	repos = checkRepositoriesParallel(paths)
 
 	clearStatus()
 	if pullAll {
@@ -393,7 +365,7 @@ func main() {
 		Long: strings.TrimSpace(`
 Scan a directory tree for git repositories and print local/remote status.
 
-Default output is a two-line block per repo (Conflicts, Diverged, Commit/Push on line 2).
+Default output is a multi-line block per repo (see Report below).
 Use --compact for one line per repo. Use --all to include clean repos.
 
 Script mode:
@@ -444,6 +416,8 @@ METRIC for --count and --only:
 	rootCmd.Flags().BoolVar(&mergeOnPull, "merge", false, "with --pull: merge local and remote commits when they do not conflict, then push to origin")
 	rootCmd.Flags().BoolVar(&pushAll, "push", false, "git push: push local commits to origin when the working tree is clean and nothing is left to pull")
 	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 5)")
+	rootCmd.Flags().BoolVar(&releaseDiff, "release-diff", false, "list commits and changed files since the latest release tag (semver, else newest tag by date)")
+	rootCmd.Flags().IntVar(&parallelJobs, "jobs", 0, "check repositories in parallel (0 = auto, up to 16 workers)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
 
 	registerCompletions(rootCmd)

@@ -21,10 +21,13 @@ While scanning, one progress line is rewritten on stderr (unless `-q` / `--quiet
 
 Only repositories that need attention are shown (dirty files, behind/ahead of origin, merge conflicts, or errors). Use `--all` to include clean repos.
 
-Each repo uses **two lines**, with a blank line between repos:
+Each repo uses **four or more lines** (blank line between repos):
 
-- **Line 1:** path, `Local` (dirty file count), `Remote` (commits behind origin), `Uncommitted`, `Conflicts`, `Diverged`, optional `Ahead`, optional error text.
-- **Line 2:** `Commit` and `Push` times, indented to line up under the **L** in `Local`.
+- **Line 0:** path, `Local`, `Remote`, `Uncommitted`, optional error text.
+- **Line 1:** last release tag under the path (one-space inset) when the repo has a semver/latest tag, then `Conflicts`, `Diverged`, `Ahead`.
+- **Line 2:** `Commit`, `Push`, and `Since <tag>:` (commits and file count when a release tag exists), aligned under **L** in `Local`.
+- **`--release-diff`:** commit and file lines after line 2.
+- **Last:** pull note, then push note (when `--pull` / `--push` ran).
 
 Only the **numeric values** (and `yes` / errors) are colourised when `--colour auto` (default). Labels stay plain.
 
@@ -88,6 +91,8 @@ Print matching **paths**, one per line (respects `--only`; default filter unless
 | `--compact` | Single-line rows |
 | `--colour auto\|always\|never` | ANSI highlighting (`NO_COLOR` / `NO_COLOUR`, `FORCE_COLOR` / `FORCE_COLOUR`) |
 | `--fetch-timeout N` | Per-fetch / SSH dial cap in seconds (default 5) |
+| `--jobs N` | Check repos in parallel (`0` = auto, up to 16); SSH fetches share a pool of 4 concurrent connections with retries on agent handshake errors |
+| `--release-diff` | List commits and file paths since the latest release tag (semver `vX.Y.Z` if present, else newest tag by date) on `origin/<branch>` |
 | `-q`, `--quiet` | No stderr progress |
 
 ## Exit codes
