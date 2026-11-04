@@ -1,0 +1,9 @@
+---
+description: Do not change appVersion in main.go
+globs: main.go
+alwaysApply: true
+---
+
+# Version string
+
+**Never change `appVersion` in `main.go`** (including for new features, fixes, or releases). The user bumps version themselves (e.g. via their build/release process).
