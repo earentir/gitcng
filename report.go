@@ -419,7 +419,7 @@ func formatSinceLastRelease(r repoStatus) string {
 		commitWord = "commit"
 	}
 	n := colourNum(digitWidth(r.SinceRelease), r.SinceRelease, colourWarn)
-	part := fmt.Sprintf("Since last release: %s %s", n, commitWord)
+	part := fmt.Sprintf("Since %s: %s %s", r.LastReleaseTag, n, commitWord)
 	if r.SinceRelease > 0 && r.SinceReleaseFiles > 0 {
 		fw := colourNum(digitWidth(r.SinceReleaseFiles), r.SinceReleaseFiles, colourWarn)
 		fileWord := "files"
