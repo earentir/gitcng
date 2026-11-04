@@ -13,7 +13,22 @@ import (
 const maxParallelJobs = 16
 
 // collectGitRepoPaths walks the tree and returns paths that are git repositories.
-func collectGitRepoPaths(path string, depth int) ([]string, error) {
+// When hereOnly is true, only path itself is considered (no subdirectory walk).
+func collectGitRepoPaths(path string, depth int, hereOnly bool) ([]string, error) {
+	if hereOnly {
+		if depth > maxDepth {
+			return nil, nil
+		}
+		_, err := git.PlainOpen(path)
+		if err == nil {
+			return []string{path}, nil
+		}
+		if depth == 0 {
+			return nil, nil
+		}
+		return nil, nil
+	}
+
 	if depth > maxDepth {
 		return nil, nil
 	}
@@ -37,7 +52,7 @@ func collectGitRepoPaths(path string, depth int) ([]string, error) {
 			continue
 		}
 		if f.Type().IsDir() && f.Type()&os.ModeSymlink != os.ModeSymlink {
-			sub, err := collectGitRepoPaths(filepath.Join(path, f.Name()), depth+1)
+			sub, err := collectGitRepoPaths(filepath.Join(path, f.Name()), depth+1, false)
 			if err != nil {
 				return nil, err
 			}

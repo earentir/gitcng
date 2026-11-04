@@ -64,6 +64,11 @@ var (
 	fetchTimeoutSec int
 	releaseDiff     bool
 	parallelJobs    int
+	outputFormat    string
+	jsonOutput      bool
+	promptMode      bool
+	hereOnly        bool
+	noFetch         bool
 	repos           []repoStatus
 
 	sshAgentOK  bool
@@ -248,18 +253,20 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 	}
 	st.RepoName = originRepoName(originURL)
 
-	tryFetch := func() {
-		writeStatus("Fetching", path)
-		err := fetchOrigin(r, originURL)
-		if err != nil && err != git.NoErrAlreadyUpToDate {
-			kind := "fetch"
-			if isOriginAuthError(err) {
-				kind = "auth"
+	if !noFetch {
+		tryFetch := func() {
+			writeStatus("Fetching", path)
+			err := fetchOrigin(r, originURL)
+			if err != nil && err != git.NoErrAlreadyUpToDate {
+				kind := "fetch"
+				if isOriginAuthError(err) {
+					kind = "auth"
+				}
+				st.Errs = append(st.Errs, userError(kind, err))
 			}
-			st.Errs = append(st.Errs, userError(kind, err))
 		}
+		tryFetch()
 	}
-	tryFetch()
 
 	remoteRef, err := r.Reference(plumbing.NewRemoteReferenceName("origin", st.Branch), true)
 	if err != nil {
@@ -296,8 +303,40 @@ func scanExitCode(repos []repoStatus) int {
 	return 0
 }
 
+func normalizeOutputFormat(format string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "text", "human":
+		return "text", nil
+	case "json", "jsonl":
+		return "json", nil
+	default:
+		return "", fmt.Errorf("unknown output format %q (use text or json)", format)
+	}
+}
+
 func runScan(root string) int {
 	repos = nil
+
+	if jsonOutput {
+		outputFormat = "json"
+	}
+	if promptMode {
+		hereOnly = true
+		quietOutput = true
+		colourMode = "never"
+	}
+
+	format, err := normalizeOutputFormat(outputFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	outputFormat = format
+
+	if countMetric != "" && onlyMetric != "" {
+		fmt.Fprintf(os.Stderr, "error: use either --count or --only, not both\n")
+		return 2
+	}
 	if countMetric != "" && onlyMetric != "" {
 		fmt.Fprintf(os.Stderr, "error: use either --count or --only, not both\n")
 		return 2
@@ -306,19 +345,27 @@ func runScan(root string) int {
 		fmt.Fprintf(os.Stderr, "error: --merge requires --pull\n")
 		return 2
 	}
-	if (pullAll || pushAll) && (countMetric != "" || listPaths) {
-		fmt.Fprintf(os.Stderr, "error: --pull/--push cannot be used with --count or --list\n")
+	if promptMode && (countMetric != "" || onlyMetric != "" || listPaths || pullAll || pushAll || outputFormat == "json") {
+		fmt.Fprintf(os.Stderr, "error: --prompt cannot be used with --count, --only, --list, --pull, --push, or --format json\n")
 		return 2
 	}
-	var err error
-	countMetric, err = normalizeMetric(countMetric)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if outputFormat == "json" && (countMetric != "" || listPaths || promptMode) {
+		fmt.Fprintf(os.Stderr, "error: --format json cannot be used with --count, --list, or --prompt\n")
 		return 2
 	}
-	onlyMetric, err = normalizeMetric(onlyMetric)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if (pullAll || pushAll) && (countMetric != "" || listPaths || outputFormat == "json") {
+		fmt.Fprintf(os.Stderr, "error: --pull/--push cannot be used with --count, --list, or --format json\n")
+		return 2
+	}
+	var err2 error
+	countMetric, err2 = normalizeMetric(countMetric)
+	if err2 != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err2)
+		return 2
+	}
+	onlyMetric, err2 = normalizeMetric(onlyMetric)
+	if err2 != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err2)
 		return 2
 	}
 
@@ -327,7 +374,7 @@ func runScan(root string) int {
 		fmt.Fprintf(os.Stderr, "warning: %s (SSH fetch may fail)\n", userError("known_hosts", err))
 	}
 
-	paths, err := collectGitRepoPaths(root, 0)
+	paths, err := collectGitRepoPaths(root, 0, hereOnly)
 	if err != nil {
 		clearStatus()
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -346,6 +393,11 @@ func runScan(root string) int {
 	}
 	rows := reposForDisplay(repos, showAll, onlyMetric, pullAll || pushAll)
 
+	if promptMode {
+		fmt.Println(countMatching(repos, metricAttention))
+		return scanExitCode(repos)
+	}
+
 	if countMetric != "" {
 		printCountReport(os.Stdout, repos, countMetric, quietOutput)
 		return scanExitCode(repos)
@@ -355,6 +407,11 @@ func runScan(root string) int {
 		for _, r := range rows {
 			fmt.Println(r.Path)
 		}
+		return scanExitCode(repos)
+	}
+
+	if outputFormat == "json" {
+		printJSONReport(os.Stdout, rows)
 		return scanExitCode(repos)
 	}
 
@@ -422,6 +479,11 @@ METRIC for --count and --only:
 	rootCmd.Flags().IntVar(&fetchTimeoutSec, "fetch-timeout", defaultNetworkTimeoutSec, "max seconds for each origin fetch and SSH dial (0 uses 10)")
 	rootCmd.Flags().BoolVar(&releaseDiff, "release-diff", false, "list commits and changed files since the latest release tag (semver, else newest tag by date)")
 	rootCmd.Flags().IntVar(&parallelJobs, "jobs", 0, "check repositories in parallel (0 = auto, up to 16 workers)")
+	rootCmd.Flags().StringVar(&outputFormat, "format", "text", "output format: text (default) or json (one JSON object per repo)")
+	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "same as --format json")
+	rootCmd.Flags().BoolVar(&promptMode, "prompt", false, "print one-line attention count for shell prompts (implies -q, --colour never, --here)")
+	rootCmd.Flags().BoolVar(&hereOnly, "here", false, "only check path if it is a git repo; do not scan subdirectories")
+	rootCmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip origin fetch and use cached refs (faster; remote counts may be stale)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
 
 	registerCompletions(rootCmd)
