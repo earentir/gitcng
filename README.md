@@ -38,7 +38,7 @@ Each repo is a block separated by a blank line. The **name on line 0** is the **
 | **0** | Name, `Local` (dirty file count), `Remote` (commits behind origin), `Uncommitted`, optional first error |
 | **1** | Release **tag** under the name (one-space inset), then `Conflicts`, `Diverged`, `Ahead` |
 | **2** | `Commit`, `Push`, `Last Release` (date of the tag), aligned under **L** in `Local` |
-| **3** | `Since last release:` commit count (and file count when &gt; 0 commits) |
+| **3** | `Since <tag>:` commit count (and file count when &gt; 0 commits) |
 | **+** | With **`--release-diff`**: one line per commit, then changed file paths |
 | **Last** | Pull note, then push note (after **`--pull`** / **`--push`**) |
 
@@ -265,12 +265,12 @@ The HTML sample below also uses **blue-grey** for repository and tag names and *
 <span style="color:#79c0ff">sqlrunner</span>               Local: 0 | Remote: 0 | Uncommitted:  no
  <span style="color:#79c0ff">v0.1.43</span>                Conflicts: 0 | Diverged:  no | Ahead: 0
                           Commit: <span style="color:#8b949e">2026-10-21 16:37</span> | Push: <span style="color:#8b949e">2026-10-21 16:37</span> | Last Release: <span style="color:#8b949e">2026-10-21 16:37</span>
-                          Since last release: <span style="color:#ffa657">55</span> commits, <span style="color:#ffa657">71</span> files
+                          Since <span style="color:#79c0ff">v0.1.43</span>: <span style="color:#ffa657">55</span> commits, <span style="color:#ffa657">71</span> files
 
 <span style="color:#79c0ff">vfikvs</span>                  Local: <span style="color:#ffa657">4</span> | Remote: 0 | Uncommitted: <span style="color:#ffa657">yes</span>
  <span style="color:#79c0ff">v0.5.103</span>               Conflicts: 0 | Diverged:  no | Ahead: 0
                           Commit: <span style="color:#8b949e">2026-10-27 16:06</span> | Push: <span style="color:#8b949e">2026-10-27 16:06</span> | Last Release: <span style="color:#8b949e">2026-10-27 16:06</span>
-                          Since last release: <span style="color:#ffa657">2</span> commits, <span style="color:#ffa657">6</span> files
+                          Since <span style="color:#79c0ff">v0.5.103</span>: <span style="color:#ffa657">2</span> commits, <span style="color:#ffa657">6</span> files
 </pre>
 <!-- markdownlint-enable MD033 -->
 
@@ -292,11 +292,11 @@ pso                       Local: 0 | Remote: 0 | Uncommitted:  no
 sqlrunner                 Local: 0 | Remote: 0 | Uncommitted:  no
  v0.1.43                  Conflicts: 0 | Diverged:  no | Ahead: 0
                           Commit: 2026-10-21 16:37 | Push: 2026-10-21 16:37 | Last Release: 2026-10-21 16:37
-                          Since last release: 55 commits, 71 files
+                          Since v0.1.43: 55 commits, 71 files
 
 vfikvs                    Local: 4 | Remote: 0 | Uncommitted: yes
  v0.5.103                 Conflicts: 0 | Diverged:  no | Ahead: 0
                           Commit: 2026-10-27 16:06 | Push: 2026-10-27 16:06 | Last Release: 2026-10-27 16:06
-                          Since last release: 2 commits, 6 files
+                          Since v0.5.103: 2 commits, 6 files
 ```
 
