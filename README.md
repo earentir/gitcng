@@ -63,7 +63,7 @@ Line 1 shows the tag name; line 2 shows **Last Release** date; line 3 counts com
 | **`--pull --merge`** | When both local and remote commits exist: if trees do not conflict, create a merge commit and **push** to `origin` (requires **`--pull`**) |
 | **`--push`** | **Push** local commits when clean, not behind, and nothing left to pull |
 
-Pull/push outcomes appear as extra lines at the bottom of each repo block. **`--pull` / `--push`** cannot be combined with **`--count`** or **`--list`**.
+Pull/push outcomes appear as extra lines at the bottom of each repo block. **`--pull` / `--push`** cannot be combined with **`--count`**, **`--list`**, or **`--format json`**.
 
 Sync uses the same SSH settings as fetch (agent, `known_hosts`, timeouts).
 
@@ -115,6 +115,71 @@ Print matching **paths** (one per line). Respects **`--only`**; respects default
 
 **`--count`** and **`--only`** cannot be used together.
 
+### `--format json` / `--json`
+
+Print **one JSON object per line** (JSONL) per repo after the usual default/**`--only`** filter (use **`--all`** to emit every repo found). Fields include `path`, `repo_name`, `local`, `remote`, `ahead`, `errors`, release fields, and pull/push notes. Intended for scripts, agents, and shell widgets.
+
+```bash
+gitcng --all --format json ../web
+gitcng --json --only ahead --all ..
+```
+
+Cannot be combined with **`--count`**, **`--list`**, **`--prompt`**, or **`--pull`** / **`--push`**.
+
+### `--prompt`
+
+Print a **single integer**: how many repositories match **`attention`**. Implies **`-q`**, **`--colour never`**, and **`--here`** (only the given path if it is one git checkout — no subtree scan). Ideal for [Flyline](https://github.com/HalFrgrd/flyline) prompt widgets.
+
+```bash
+gitcng --prompt          # from a repo root → 0 or 1
+gitcng --prompt .        # same
+```
+
+### `--here`
+
+Only inspect **`path`** when it is already a git repository. Do not walk subdirectories. If **`path`** is not a repo, the scan finds nothing (exit **0**, empty output).
+
+### `--no-fetch`
+
+Skip **`origin` fetch**; ahead/behind and release data use **cached** remote refs. Faster (especially with **`--prompt --no-fetch`**) but may be stale after network issues or timeouts.
+
+## Flyline and flycomp
+
+[Flyline](https://github.com/HalFrgrd/flyline) replaces Bash line editing (completion, autosuggest, prompt widgets). gitcng does not require a Flyline plugin; use these patterns:
+
+**Tab completion** (after `enable flyline` in `.bashrc`):
+
+```bash
+source <(gitcng completion bash)
+```
+
+Flyline’s [flycomp](https://github.com/HalFrgrd/flycomp) can also synthesize completions from `gitcng --help`; sourced bash completion is still the most complete (metrics, **`--format`**, **`--jobs`**, etc.).
+
+**Prompt widget** — repos needing attention in the **current checkout only**:
+
+```bash
+flyline create-prompt-widget custom --name GIT_ATT \
+  --command 'gitcng --prompt --no-fetch . 2>/dev/null' \
+  --block 800 --placeholder prev
+# PS1='... [GIT_ATT] $ '
+```
+
+**Fast stale badge** (no network on each prompt):
+
+```bash
+flyline create-prompt-widget custom --name GIT_ATT_CACHED \
+  --command 'gitcng --prompt --no-fetch . 2>/dev/null' \
+  --block 200 --placeholder prev
+```
+
+**JSON for custom widgets** (parse with `jq`):
+
+```bash
+gitcng --here --json --all . | jq -s '.'
+```
+
+Run full-tree scans (`../web`) from the shell by hand; avoid scanning large trees on every prompt redraw.
+
 ## All flags
 
 | Flag | Purpose |
@@ -125,6 +190,11 @@ Print matching **paths** (one per line). Respects **`--only`**; respects default
 | `--colour auto\|always\|never` | ANSI highlighting |
 | `--fetch-timeout N` | Fetch / SSH timeout in seconds (default **10**) |
 | `--jobs N` | Parallel repo checks (`0` = auto, max **16**) |
+| `--format text\|json` | Human report (default) or JSONL per repo |
+| `--json` | Same as **`--format json`** |
+| `--prompt` | One-line attention count (**`-q`**, **`--colour never`**, **`--here`**) |
+| `--here` | Only check **`path`** if it is a git repo |
+| `--no-fetch` | Skip origin fetch; use cached refs |
 | `--release-diff` | List commits and files since latest release tag |
 | `--pull` | Fast-forward pull when safe |
 | `--merge` | With `--pull`: merge non-conflicting diverged branches, then push |
@@ -162,7 +232,7 @@ Install:
 
 Zsh: `gitcng completion zsh > "${fpath[1]}/_gitcng"` then `compinit`.
 
-Tab completes metrics for **`--count`** / **`--only`**, **`--colour`**, and directory paths.
+Tab completes metrics for **`--count`** / **`--only`**, **`--colour`**, **`--format`**, **`--depth`**, **`--jobs`**, **`--fetch-timeout`**, and directory paths.
 
 ## Example (default layout)
 
