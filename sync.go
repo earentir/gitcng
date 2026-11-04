@@ -94,16 +94,21 @@ func runPullContext(path string, auth gogitssh.AuthMethod) error {
 		return err
 	}
 	opts := &git.PullOptions{RemoteName: "origin"}
-	if auth != nil {
+	usesSSH := auth != nil
+	if usesSSH {
 		opts.Auth = sshWrappedAuth(auth)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
-	defer cancel()
-	err = w.PullContext(ctx, opts)
-	if err == git.NoErrAlreadyUpToDate {
-		return nil
-	}
-	return err
+	return withSSHTransportRetries(func() error {
+		return withSSHNetworkLimit(usesSSH, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
+			defer cancel()
+			err := w.PullContext(ctx, opts)
+			if err == git.NoErrAlreadyUpToDate {
+				return nil
+			}
+			return err
+		})
+	})
 }
 
 func runPush(path, branch string, auth gogitssh.AuthMethod) error {
@@ -115,21 +120,26 @@ func runPush(path, branch string, auth gogitssh.AuthMethod) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
-	defer cancel()
 	ref := plumbing.NewBranchReferenceName(branch)
 	opts := &git.PushOptions{
 		RemoteName: "origin",
 		RefSpecs:   []config.RefSpec{config.RefSpec(ref.String() + ":" + ref.String())},
 	}
-	if auth != nil {
+	usesSSH := auth != nil
+	if usesSSH {
 		opts.Auth = sshWrappedAuth(auth)
 	}
-	err = remote.PushContext(ctx, opts)
-	if err == git.NoErrAlreadyUpToDate {
-		return nil
-	}
-	return err
+	return withSSHTransportRetries(func() error {
+		return withSSHNetworkLimit(usesSSH, func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
+			defer cancel()
+			err := remote.PushContext(ctx, opts)
+			if err == git.NoErrAlreadyUpToDate {
+				return nil
+			}
+			return err
+		})
+	})
 }
 
 func (r repoStatus) syncBlockReason() string {
