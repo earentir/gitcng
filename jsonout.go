@@ -20,6 +20,7 @@ type repoJSON struct {
 	LastPush          string   `json:"last_push,omitempty"`
 	LastReleaseTag    string   `json:"last_release_tag,omitempty"`
 	LastRelease       string   `json:"last_release,omitempty"`
+	NoReleaseTags     bool     `json:"no_release_tags,omitempty"`
 	SinceRelease      *int     `json:"since_release,omitempty"`
 	SinceReleaseFiles int      `json:"since_release_files,omitempty"`
 	PullNote          string   `json:"pull_note,omitempty"`
@@ -53,6 +54,7 @@ func repoToJSON(r repoStatus) repoJSON {
 	if r.HasLastRelease && !r.LastRelease.IsZero() {
 		out.LastRelease = formatReportTime(r.LastRelease)
 	}
+	out.NoReleaseTags = r.NoReleaseTags
 	if r.SinceRelease >= 0 {
 		n := r.SinceRelease
 		out.SinceRelease = &n

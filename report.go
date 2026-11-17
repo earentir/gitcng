@@ -19,7 +19,10 @@ const metricsSep = "   "
 
 const (
 	ansiReset = "\033[0m"
-	ansiWarn  = "\033[38;5;208m" // orange — dirty / uncommitted / behind / ahead
+	ansiGood  = "\033[32m"       // green — pull/push succeeded
+	ansiNote  = "\033[33m"       // yellow — listed / skip reasons (not metric highlights)
+	ansiMuted = "\033[90m"       // gray — low-severity / informational status
+	ansiWarn  = "\033[38;5;208m" // orange — dirty / uncommitted / behind / ahead metrics
 	ansiErr   = "\033[91m"       // bright red — merge conflicts and hard errors
 )
 
@@ -73,6 +76,27 @@ func colourErr(s string) string {
 		return s
 	}
 	return ansiErr + s + ansiReset
+}
+
+func colourGood(s string) string {
+	if !useColour() {
+		return s
+	}
+	return ansiGood + s + ansiReset
+}
+
+func colourNote(s string) string {
+	if !useColour() {
+		return s
+	}
+	return ansiNote + s + ansiReset
+}
+
+func colourMuted(s string) string {
+	if !useColour() {
+		return s
+	}
+	return ansiMuted + s + ansiReset
 }
 
 func colourNum(width, val int, tint func(string) string) string {
@@ -145,9 +169,24 @@ func clearStatus() {
 	fmt.Fprint(os.Stderr, "\r\033[K")
 }
 
+// severityActionable: needs work (sync, conflicts, errors).
+func (r repoStatus) severityActionable() bool {
+	return r.DirtyFiles > 0 || r.Ahead > 0 || r.Behind > 0 || r.Conflicts > 0 || len(r.Errs) > 0
+}
+
+// severityInformational: in sync with origin but release tagging lags (or missing).
+func (r repoStatus) severityInformational() bool {
+	if r.severityActionable() {
+		return false
+	}
+	if r.NoReleaseTags && r.SinceRelease > 0 {
+		return true
+	}
+	return r.HasLastRelease && r.SinceRelease > 0
+}
+
 func (r repoStatus) hasChanges() bool {
-	return r.DirtyFiles > 0 || r.Ahead > 0 || r.Behind > 0 || r.Conflicts > 0 ||
-		(r.Ahead > 0 && r.Behind > 0) || len(r.Errs) > 0 || r.SinceRelease > 0
+	return r.severityActionable() || r.severityInformational()
 }
 
 func (r repoStatus) uncommitted() bool {
@@ -169,46 +208,107 @@ func formatPushNote(r repoStatus) string {
 	if r.PushNote == "" {
 		return ""
 	}
-	note := r.PushNote
 	switch r.PushOutcome {
+	case pushDone:
+		return colourGood(r.PushNote)
 	case pushSkipped:
-		note = colourWarn(note)
+		return colourNote(r.PushNote)
 	case pushFailed:
-		note = colourErr(note)
+		return colourErr(r.PushNote)
+	default:
+		return r.PushNote
 	}
-	return note
-}
-
-func rowPushLine(r repoStatus, pathCol int) string {
-	note := formatPushNote(r)
-	if note == "" {
-		return ""
-	}
-	indent := strings.Repeat(" ", pathCol+len(metricsSep))
-	return indent + note
 }
 
 func formatPullNote(r repoStatus) string {
 	if r.PullNote == "" {
 		return ""
 	}
-	note := r.PullNote
 	switch r.PullOutcome {
+	case pullDone:
+		return colourGood(r.PullNote)
 	case pullSkipped:
-		note = colourWarn(note)
+		return colourNote(r.PullNote)
+	case pullUpToDate:
+		return colourMuted(r.PullNote)
 	case pullFailed:
-		note = colourErr(note)
+		return colourErr(r.PullNote)
+	default:
+		return r.PullNote
 	}
-	return note
 }
 
-func rowPullLine(r repoStatus, pathCol int) string {
-	note := formatPullNote(r)
-	if note == "" {
+func releaseStatusPart(r repoStatus) string {
+	if r.NoReleaseTags && r.SinceRelease > 0 {
+		return formatNoReleaseTag(r)
+	}
+	if !r.HasLastRelease || r.SinceRelease <= 0 {
+		return ""
+	}
+	if !r.severityActionable() {
+		return colourMuted(formatSinceLastReleasePlain(r))
+	}
+	return formatSinceLastRelease(r)
+}
+
+func syncStatusParts(r repoStatus) []string {
+	var parts []string
+	if r.DirtyFiles == 1 {
+		parts = append(parts, colourNote("1 uncommitted change"))
+	} else if r.DirtyFiles > 1 {
+		parts = append(parts, colourNote(fmt.Sprintf("%d uncommitted changes", r.DirtyFiles)))
+	}
+	if r.Behind > 0 {
+		if r.Behind == 1 {
+			parts = append(parts, colourNote("1 commit behind origin"))
+		} else {
+			parts = append(parts, colourNote(fmt.Sprintf("%d commits behind origin", r.Behind)))
+		}
+	}
+	if r.Ahead > 0 && r.Behind > 0 {
+		parts = append(parts, colourNote("diverged from origin"))
+	} else if r.Ahead > 0 {
+		if r.Ahead == 1 {
+			parts = append(parts, colourNote("1 commit ahead of origin"))
+		} else {
+			parts = append(parts, colourNote(fmt.Sprintf("%d commits ahead of origin", r.Ahead)))
+		}
+	}
+	if r.Conflicts == 1 {
+		parts = append(parts, colourNote("1 merge conflict"))
+	} else if r.Conflicts > 1 {
+		parts = append(parts, colourNote(fmt.Sprintf("%d merge conflicts", r.Conflicts)))
+	}
+	if len(r.Errs) > 0 {
+		parts = append(parts, colourErr("scan error(s)"))
+	}
+	return parts
+}
+
+func rowCombinedStatusLine(r repoStatus, pathCol int, didPull, didPush, showAll bool) string {
+	var parts []string
+	if didPull || didPush {
+		if n := formatPullNote(r); n != "" {
+			parts = append(parts, n)
+		}
+		if n := formatPushNote(r); n != "" {
+			parts = append(parts, n)
+		}
+	} else {
+		if p := releaseStatusPart(r); p != "" {
+			parts = append(parts, p)
+		}
+		parts = append(parts, syncStatusParts(r)...)
+	}
+	if len(parts) == 0 {
+		if showAll && !didPull && !didPush && !r.severityActionable() && !r.severityInformational() {
+			indent := strings.Repeat(" ", pathCol+len(metricsSep))
+			return indent + colourMuted("up to date with origin")
+		}
 		return ""
 	}
 	indent := strings.Repeat(" ", pathCol+len(metricsSep))
-	return indent + note
+	return indent + strings.Join(parts, " | ")
 }
 
 func repoDisplayPath(path string) string {
@@ -227,7 +327,7 @@ func repoDisplayName(r repoStatus) string {
 	return repoDisplayPath(r.Path)
 }
 
-func printReport(w io.Writer, rows []repoStatus) {
+func printReport(w io.Writer, rows []repoStatus, didPull, didPush, showAll bool) {
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No repositories with local or remote changes")
 		return
@@ -291,15 +391,12 @@ func printReport(w io.Writer, rows []repoStatus) {
 
 		if reportCompact {
 			line := formatRowCompact(r, path, localW, remoteW, conflictW, aheadW)
-			if note := formatPullNote(r); note != "" {
-				line += " | " + note
-			}
-			if note := formatPushNote(r); note != "" {
-				line += " | " + note
-			}
 			fmt.Fprintln(w, trimVisible(line, cols))
 			for _, diffLine := range rowReleaseDiffLines(r, pathCol) {
 				fmt.Fprintln(w, trimVisible(diffLine, cols))
+			}
+			if status := rowCombinedStatusLine(r, pathCol, didPull, didPush, showAll); status != "" {
+				fmt.Fprintln(w, trimVisible(status, cols))
 			}
 			if i < len(rows)-1 {
 				fmt.Fprintln(w)
@@ -316,18 +413,11 @@ func printReport(w io.Writer, rows []repoStatus) {
 		line2 := rowLine2(r, pathCol)
 		fmt.Fprintln(w, trimVisible(line2, cols))
 
-		if sinceLine := rowSinceReleaseLine(r, pathCol); sinceLine != "" {
-			fmt.Fprintln(w, trimVisible(sinceLine, cols))
-		}
-
 		for _, diffLine := range rowReleaseDiffLines(r, pathCol) {
 			fmt.Fprintln(w, trimVisible(diffLine, cols))
 		}
-		if pullLine := rowPullLine(r, pathCol); pullLine != "" {
-			fmt.Fprintln(w, trimVisible(pullLine, cols))
-		}
-		if pushLine := rowPushLine(r, pathCol); pushLine != "" {
-			fmt.Fprintln(w, trimVisible(pushLine, cols))
+		if status := rowCombinedStatusLine(r, pathCol, didPull, didPush, showAll); status != "" {
+			fmt.Fprintln(w, trimVisible(status, cols))
 		}
 		if i < len(rows)-1 {
 			fmt.Fprintln(w)
@@ -405,12 +495,28 @@ func rowLine2(r repoStatus, pathCol int) string {
 	return line
 }
 
-func rowSinceReleaseLine(r repoStatus, pathCol int) string {
-	if !r.HasLastRelease || r.SinceRelease < 0 {
-		return ""
+func formatSinceLastReleasePlain(r repoStatus) string {
+	commitWord := "commits"
+	if r.SinceRelease == 1 {
+		commitWord = "commit"
 	}
-	indent := strings.Repeat(" ", pathCol+len(metricsSep))
-	return indent + formatSinceLastRelease(r)
+	part := fmt.Sprintf("Since %s: %d %s", r.LastReleaseTag, r.SinceRelease, commitWord)
+	if r.SinceRelease > 0 && r.SinceReleaseFiles > 0 {
+		fileWord := "files"
+		if r.SinceReleaseFiles == 1 {
+			fileWord = "file"
+		}
+		part += fmt.Sprintf(", %d %s", r.SinceReleaseFiles, fileWord)
+	}
+	return part
+}
+
+func formatNoReleaseTag(r repoStatus) string {
+	commitWord := "commits"
+	if r.SinceRelease == 1 {
+		commitWord = "commit"
+	}
+	return colourMuted(fmt.Sprintf("No release tag: %d %s", r.SinceRelease, commitWord))
 }
 
 func formatSinceLastRelease(r repoStatus) string {
@@ -469,9 +575,6 @@ func formatRowCompact(r repoStatus, path string, localW, remoteW, conflictW, ahe
 		fmt.Sprintf(" | Commit: %s | Push: %s", commit, push)
 	if r.HasLastRelease {
 		line += fmt.Sprintf(" | Last Release: %s", formatReportTime(r.LastRelease))
-	}
-	if r.HasLastRelease && r.SinceRelease >= 0 {
-		line += " | " + formatSinceLastRelease(r)
 	}
 	if len(r.Errs) > 0 {
 		line += " | " + colourErr(r.Errs[0])

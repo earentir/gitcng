@@ -82,7 +82,31 @@ func filterRepos(repos []repoStatus, metric string) []repoStatus {
 	return out
 }
 
-func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string, includePullNotes bool) []repoStatus {
+func hasSyncAttention(r repoStatus) bool {
+	return r.DirtyFiles > 0 || r.Ahead > 0 || r.Behind > 0 || r.Conflicts > 0 || len(r.Errs) > 0
+}
+
+func pullDetailRow(r repoStatus) bool {
+	switch r.PullOutcome {
+	case pullDone, pullFailed, pullSkipped:
+		return true
+	case pullUpToDate:
+		return hasSyncAttention(r)
+	default:
+		return r.hasChanges()
+	}
+}
+
+func pushDetailRow(r repoStatus) bool {
+	switch r.PushOutcome {
+	case pushDone, pushFailed, pushSkipped:
+		return true
+	default:
+		return hasSyncAttention(r)
+	}
+}
+
+func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string, didPull, didPush bool) []repoStatus {
 	if onlyMetric != "" {
 		return filterRepos(repos, onlyMetric)
 	}
@@ -91,7 +115,17 @@ func reposForDisplay(repos []repoStatus, showAll bool, onlyMetric string, includ
 	}
 	var out []repoStatus
 	for _, r := range repos {
-		if r.hasChanges() || (includePullNotes && (r.PullNote != "" || r.PushNote != "")) {
+		if didPull || didPush {
+			if didPull && pullDetailRow(r) {
+				out = append(out, r)
+				continue
+			}
+			if didPush && pushDetailRow(r) {
+				out = append(out, r)
+			}
+			continue
+		}
+		if r.severityActionable() {
 			out = append(out, r)
 		}
 	}
