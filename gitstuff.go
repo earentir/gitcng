@@ -99,6 +99,83 @@ func countCommitsUntil(r *git.Repository, from, stop plumbing.Hash) (int, error)
 	return count, nil
 }
 
+func countCommitsFromTip(r *git.Repository, from plumbing.Hash) (int, error) {
+	cIter, err := r.Log(&git.LogOptions{From: from})
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	err = cIter.ForEach(func(c *object.Commit) error {
+		count++
+		return nil
+	})
+	return count, err
+}
+
+// originTrackingRef is the remote-tracking ref for the current branch (from branch.*.merge, else origin/<local>).
+func originTrackingRef(r *git.Repository, localBranch string) plumbing.ReferenceName {
+	cfg, err := r.Config()
+	if err == nil {
+		if b, ok := cfg.Branches[localBranch]; ok && b.Merge != "" {
+			remote := b.Remote
+			if remote == "" {
+				remote = "origin"
+			}
+			merge := plumbing.ReferenceName(b.Merge)
+			if merge.IsBranch() {
+				return plumbing.NewRemoteReferenceName(remote, merge.Short())
+			}
+		}
+	}
+	return plumbing.NewRemoteReferenceName("origin", localBranch)
+}
+
+func remoteCompareCandidates(r *git.Repository, localBranch string) []plumbing.ReferenceName {
+	seen := map[plumbing.ReferenceName]bool{}
+	var out []plumbing.ReferenceName
+	add := func(n plumbing.ReferenceName) {
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	add(originTrackingRef(r, localBranch))
+	add(plumbing.NewRemoteReferenceName("origin", localBranch))
+	head, err := r.Reference(plumbing.NewRemoteReferenceName("origin", "HEAD"), true)
+	if err == nil && head.Type() == plumbing.SymbolicReference {
+		add(head.Target())
+	}
+	return out
+}
+
+func resolveOriginRemoteRef(r *git.Repository, localBranch string) (*plumbing.Reference, error) {
+	for _, name := range remoteCompareCandidates(r, localBranch) {
+		ref, err := r.Reference(name, true)
+		if err == nil {
+			return ref, nil
+		}
+	}
+	return nil, fmt.Errorf("no origin ref for branch %q (try: git fetch origin)", localBranch)
+}
+
+func remoteBranchShortFromRef(ref *plumbing.Reference) string {
+	name := ref.Name()
+	if !name.IsRemote() {
+		return name.Short()
+	}
+	const prefix = "refs/remotes/"
+	s := name.String()
+	if !strings.HasPrefix(s, prefix) {
+		return name.Short()
+	}
+	rest := strings.TrimPrefix(s, prefix)
+	if i := strings.Index(rest, "/"); i >= 0 {
+		return rest[i+1:]
+	}
+	return rest
+}
+
 func originRemoteURL(remotes []*git.Remote) (url string, hasOrigin bool) {
 	for _, remote := range remotes {
 		if remote.Config().Name != "origin" {
@@ -140,6 +217,35 @@ func originRepoName(originURL string) string {
 		return rest
 	}
 	return ""
+}
+
+func originHostLabel(originURL string) string {
+	u := strings.TrimSpace(originURL)
+	if u == "" {
+		return ""
+	}
+	if strings.HasPrefix(u, "git@") {
+		host, _, _ := strings.Cut(strings.TrimPrefix(u, "git@"), ":")
+		return host
+	}
+	parsed, err := url.Parse(u)
+	if err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return u
+}
+
+func isWellKnownPublicGitHost(originURL string) bool {
+	u := strings.ToLower(originURL)
+	for _, h := range []string{
+		"github.com", "ssh.github.com",
+		"gitlab.com", "bitbucket.org", "codeberg.org",
+	} {
+		if strings.Contains(u, h) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSSHRemoteURL(remoteURL string) bool {
