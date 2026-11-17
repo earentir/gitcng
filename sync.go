@@ -22,6 +22,7 @@ const (
 	pullSkipped
 	pullDone
 	pullFailed
+	pullUpToDate
 )
 
 type pushOutcome int
@@ -84,7 +85,17 @@ func authForOriginURL(originURL string) (gogitssh.AuthMethod, error) {
 	return auth, nil
 }
 
-func runPullContext(path string, auth gogitssh.AuthMethod) error {
+func runPullContext(path, branch, originURL string, auth gogitssh.AuthMethod) error {
+	usesSSH := auth != nil
+	remoteBranch := branch
+	if r, err := git.PlainOpen(path); err == nil {
+		if ref, err := resolveOriginRemoteRef(r, branch); err == nil {
+			remoteBranch = remoteBranchShortFromRef(ref)
+		}
+	}
+	if _, err := gitOnPath(); err == nil {
+		return runPullGit(path, remoteBranch, originURL, usesSSH)
+	}
 	r, err := git.PlainOpen(path)
 	if err != nil {
 		return err
@@ -94,12 +105,11 @@ func runPullContext(path string, auth gogitssh.AuthMethod) error {
 		return err
 	}
 	opts := &git.PullOptions{RemoteName: "origin"}
-	usesSSH := auth != nil
 	if usesSSH {
 		opts.Auth = sshWrappedAuth(auth)
 	}
 	return withSSHTransportRetries(func() error {
-		return withSSHNetworkLimit(usesSSH, func() error {
+		return withSSHNetworkLimit(usesSSH, originURL, func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
 			defer cancel()
 			err := w.PullContext(ctx, opts)
@@ -111,7 +121,11 @@ func runPullContext(path string, auth gogitssh.AuthMethod) error {
 	})
 }
 
-func runPush(path, branch string, auth gogitssh.AuthMethod) error {
+func runPush(path, branch, originURL string, auth gogitssh.AuthMethod) error {
+	usesSSH := auth != nil
+	if _, err := gitOnPath(); err == nil {
+		return runPushGit(path, branch, originURL, usesSSH)
+	}
 	r, err := git.PlainOpen(path)
 	if err != nil {
 		return err
@@ -125,12 +139,11 @@ func runPush(path, branch string, auth gogitssh.AuthMethod) error {
 		RemoteName: "origin",
 		RefSpecs:   []config.RefSpec{config.RefSpec(ref.String() + ":" + ref.String())},
 	}
-	usesSSH := auth != nil
 	if usesSSH {
 		opts.Auth = sshWrappedAuth(auth)
 	}
 	return withSSHTransportRetries(func() error {
-		return withSSHNetworkLimit(usesSSH, func() error {
+		return withSSHNetworkLimit(usesSSH, originURL, func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), networkTimeout())
 			defer cancel()
 			err := remote.PushContext(ctx, opts)
@@ -165,7 +178,7 @@ func refreshRepoStatus(i int) {
 	pushNote := repos[i].PushNote
 	pullOut := repos[i].PullOutcome
 	pushOut := repos[i].PushOutcome
-	repos[i] = checkRepository(repos[i].Path, r)
+	repos[i] = checkRepository(repos[i].Path, r, true)
 	repos[i].PullNote = note
 	repos[i].PushNote = pushNote
 	repos[i].PullOutcome = pullOut
@@ -173,139 +186,171 @@ func refreshRepoStatus(i int) {
 }
 
 func applyPullAll(mergeAndPush bool) {
+	var todo []int
 	for i := range repos {
-		st := repos[i]
-		if st.Behind == 0 {
+		if repos[i].Behind > 0 {
+			todo = append(todo, i)
+		}
+	}
+	forEachRepoParallel(todo, func(i int) {
+		pullRepoAt(i, mergeAndPush)
+	})
+	for i := range repos {
+		if repos[i].Behind > 0 || repos[i].PullOutcome != pullNone {
 			continue
 		}
-		if reason := st.syncBlockReason(); reason != "" {
+		if reason := repos[i].syncBlockReason(); reason != "" {
 			repos[i].PullNote = fmt.Sprintf("not pulled: %s", reason)
 			repos[i].PullOutcome = pullSkipped
 			continue
 		}
+		repos[i].PullNote = "pull not needed: up to date with origin"
+		repos[i].PullOutcome = pullUpToDate
+	}
+}
 
-		_, _, auth, err := openRepoOrigin(st.Path)
+func pullRepoAt(i int, mergeAndPush bool) {
+	st := repos[i]
+	if st.Behind == 0 {
+		return
+	}
+	if reason := st.syncBlockReason(); reason != "" {
+		repos[i].PullNote = fmt.Sprintf("not pulled: %s", reason)
+		repos[i].PullOutcome = pullSkipped
+		return
+	}
+
+	_, originURL, auth, err := openRepoOrigin(st.Path)
+	if err != nil {
+		repos[i].PullNote = "pull failed: " + userError("pull", err)
+		repos[i].PullOutcome = pullFailed
+		repos[i].Errs = append(repos[i].Errs, userError("pull", err))
+		return
+	}
+
+	if st.Ahead == 0 {
+		writeStatus("Pulling", st.Path)
+		err = runPullContext(st.Path, st.Branch, originURL, auth)
+		if err == git.ErrNonFastForwardUpdate {
+			repos[i].PullNote = fmt.Sprintf("not pulled: non-fast-forward — %d commit(s) on origin", st.Behind)
+			repos[i].PullOutcome = pullSkipped
+			return
+		}
 		if err != nil {
 			repos[i].PullNote = "pull failed: " + userError("pull", err)
 			repos[i].PullOutcome = pullFailed
 			repos[i].Errs = append(repos[i].Errs, userError("pull", err))
-			continue
+			return
 		}
-
-		if st.Ahead == 0 {
-			writeStatus("Pulling", st.Path)
-			err = runPullContext(st.Path, auth)
-			if err == git.ErrNonFastForwardUpdate {
-				repos[i].PullNote = fmt.Sprintf("not pulled: non-fast-forward — %d commit(s) on origin", st.Behind)
-				repos[i].PullOutcome = pullSkipped
-				continue
-			}
-			if err != nil {
-				repos[i].PullNote = "pull failed: " + userError("pull", err)
-				repos[i].PullOutcome = pullFailed
-				repos[i].Errs = append(repos[i].Errs, userError("pull", err))
-				continue
-			}
-			if st.Behind == 1 {
-				repos[i].PullNote = "pulled 1 commit (fast-forward)"
-			} else {
-				repos[i].PullNote = fmt.Sprintf("pulled %d commits (fast-forward)", st.Behind)
-			}
-			repos[i].PullOutcome = pullDone
-			refreshRepoStatus(i)
-			continue
+		if st.Behind == 1 {
+			repos[i].PullNote = "pulled 1 commit (fast-forward)"
+		} else {
+			repos[i].PullNote = fmt.Sprintf("pulled %d commits (fast-forward)", st.Behind)
 		}
-
-		if !mergeAndPush {
-			repos[i].PullNote = fmt.Sprintf("not pulled: %d local and %d remote commit(s) — use --pull --merge", st.Ahead, st.Behind)
-			repos[i].PullOutcome = pullSkipped
-			continue
-		}
-
-		writeStatus("Merging", st.Path)
-		conflict, err := mergeHasConflicts(st.Path, st.Branch)
-		if err != nil {
-			repos[i].PullNote = "merge failed: " + userError("merge", err)
-			repos[i].PullOutcome = pullFailed
-			repos[i].Errs = append(repos[i].Errs, userError("merge", err))
-			continue
-		}
-		if conflict {
-			repos[i].PullNote = fmt.Sprintf("not merged: local and remote changes conflict — %d ahead, %d behind", st.Ahead, st.Behind)
-			repos[i].PullOutcome = pullSkipped
-			continue
-		}
-
-		if err := performCleanMerge(st.Path, st.Branch); err != nil {
-			repos[i].PullNote = "merge failed: " + userError("merge", err)
-			repos[i].PullOutcome = pullFailed
-			repos[i].Errs = append(repos[i].Errs, userError("merge", err))
-			continue
-		}
-		repos[i].PullNote = fmt.Sprintf("merged origin with local (%d remote, %d local commits)", st.Behind, st.Ahead)
 		repos[i].PullOutcome = pullDone
 		refreshRepoStatus(i)
-
-		writeStatus("Pushing", st.Path)
-		_, _, auth, err = openRepoOrigin(st.Path)
-		if err != nil {
-			repos[i].PushNote = "push failed: " + userError("push", err)
-			repos[i].PushOutcome = pushFailed
-			repos[i].Errs = append(repos[i].Errs, userError("push", err))
-			continue
-		}
-		if err := runPush(st.Path, repos[i].Branch, auth); err != nil {
-			repos[i].PushNote = "push failed: " + userError("push", err)
-			repos[i].PushOutcome = pushFailed
-			repos[i].Errs = append(repos[i].Errs, userError("push", err))
-			continue
-		}
-		repos[i].PushNote = "pushed merged commits to origin"
-		repos[i].PushOutcome = pushDone
-		refreshRepoStatus(i)
+		return
 	}
+
+	if !mergeAndPush {
+		repos[i].PullNote = fmt.Sprintf("not pulled: %d local and %d remote commit(s) — use --pull --merge", st.Ahead, st.Behind)
+		repos[i].PullOutcome = pullSkipped
+		return
+	}
+
+	writeStatus("Merging", st.Path)
+	conflict, err := mergeHasConflicts(st.Path, st.Branch)
+	if err != nil {
+		repos[i].PullNote = "merge failed: " + userError("merge", err)
+		repos[i].PullOutcome = pullFailed
+		repos[i].Errs = append(repos[i].Errs, userError("merge", err))
+		return
+	}
+	if conflict {
+		repos[i].PullNote = fmt.Sprintf("not merged: local and remote changes conflict — %d ahead, %d behind", st.Ahead, st.Behind)
+		repos[i].PullOutcome = pullSkipped
+		return
+	}
+
+	if err := performCleanMerge(st.Path, st.Branch); err != nil {
+		repos[i].PullNote = "merge failed: " + userError("merge", err)
+		repos[i].PullOutcome = pullFailed
+		repos[i].Errs = append(repos[i].Errs, userError("merge", err))
+		return
+	}
+	repos[i].PullNote = fmt.Sprintf("merged origin with local (%d remote, %d local commits)", st.Behind, st.Ahead)
+	repos[i].PullOutcome = pullDone
+	refreshRepoStatus(i)
+
+	writeStatus("Pushing", st.Path)
+	_, originURL, auth, err = openRepoOrigin(st.Path)
+	if err != nil {
+		repos[i].PushNote = "push failed: " + userError("push", err)
+		repos[i].PushOutcome = pushFailed
+		repos[i].Errs = append(repos[i].Errs, userError("push", err))
+		return
+	}
+	if err := runPush(st.Path, repos[i].Branch, originURL, auth); err != nil {
+		repos[i].PushNote = "push failed: " + userError("push", err)
+		repos[i].PushOutcome = pushFailed
+		repos[i].Errs = append(repos[i].Errs, userError("push", err))
+		return
+	}
+	repos[i].PushNote = "pushed merged commits to origin"
+	repos[i].PushOutcome = pushDone
+	refreshRepoStatus(i)
 }
 
 func applyPushAll() {
+	var todo []int
 	for i := range repos {
-		st := repos[i]
-		if st.Ahead == 0 {
-			continue
+		if repos[i].Ahead > 0 {
+			todo = append(todo, i)
 		}
-		if reason := st.syncBlockReason(); reason != "" {
-			repos[i].PushNote = fmt.Sprintf("not pushed: %s", reason)
-			repos[i].PushOutcome = pushSkipped
-			continue
-		}
-		if st.Behind > 0 {
-			repos[i].PushNote = fmt.Sprintf("not pushed: %d commit(s) on origin — pull first", st.Behind)
-			repos[i].PushOutcome = pushSkipped
-			continue
-		}
-
-		_, _, auth, err := openRepoOrigin(st.Path)
-		if err != nil {
-			repos[i].PushNote = "push failed: " + userError("push", err)
-			repos[i].PushOutcome = pushFailed
-			repos[i].Errs = append(repos[i].Errs, userError("push", err))
-			continue
-		}
-
-		writeStatus("Pushing", st.Path)
-		if err := runPush(st.Path, st.Branch, auth); err != nil {
-			repos[i].PushNote = "push failed: " + userError("push", err)
-			repos[i].PushOutcome = pushFailed
-			repos[i].Errs = append(repos[i].Errs, userError("push", err))
-			continue
-		}
-		if st.Ahead == 1 {
-			repos[i].PushNote = "pushed 1 commit to origin"
-		} else {
-			repos[i].PushNote = fmt.Sprintf("pushed %d commits to origin", st.Ahead)
-		}
-		repos[i].PushOutcome = pushDone
-		refreshRepoStatus(i)
 	}
+	forEachRepoParallel(todo, func(i int) {
+		pushRepoAt(i)
+	})
+}
+
+func pushRepoAt(i int) {
+	st := repos[i]
+	if st.Ahead == 0 {
+		return
+	}
+	if reason := st.syncBlockReason(); reason != "" {
+		repos[i].PushNote = fmt.Sprintf("not pushed: %s", reason)
+		repos[i].PushOutcome = pushSkipped
+		return
+	}
+	if st.Behind > 0 {
+		repos[i].PushNote = fmt.Sprintf("not pushed: %d commit(s) on origin — pull first", st.Behind)
+		repos[i].PushOutcome = pushSkipped
+		return
+	}
+
+	_, originURL, auth, err := openRepoOrigin(st.Path)
+	if err != nil {
+		repos[i].PushNote = "push failed: " + userError("push", err)
+		repos[i].PushOutcome = pushFailed
+		repos[i].Errs = append(repos[i].Errs, userError("push", err))
+		return
+	}
+
+	writeStatus("Pushing", st.Path)
+	if err := runPush(st.Path, st.Branch, originURL, auth); err != nil {
+		repos[i].PushNote = "push failed: " + userError("push", err)
+		repos[i].PushOutcome = pushFailed
+		repos[i].Errs = append(repos[i].Errs, userError("push", err))
+		return
+	}
+	if st.Ahead == 1 {
+		repos[i].PushNote = "pushed 1 commit to origin"
+	} else {
+		repos[i].PushNote = fmt.Sprintf("pushed %d commits to origin", st.Ahead)
+	}
+	repos[i].PushOutcome = pushDone
+	refreshRepoStatus(i)
 }
 
 func changePath(ch *object.Change) string {
