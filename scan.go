@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,43 +11,74 @@ import (
 	git "github.com/go-git/go-git/v5"
 )
 
-const maxParallelJobs = 16
+const (
+	maxParallelJobs    = 16
+	defaultScanDepth   = 4
+)
+
+func effectiveScanDepth() int {
+	if maxDepth > 0 {
+		return maxDepth
+	}
+	return defaultScanDepth
+}
+
+func canonicalRepoPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(abs)
+}
+
+// formatListPath prints a repo path relative to the scan root (e.g. "dso", not "/home/.../web/dso").
+func formatListPath(scanRoot, repoPath string) string {
+	scanRoot = canonicalRepoPath(scanRoot)
+	repoPath = canonicalRepoPath(repoPath)
+	rel, err := filepath.Rel(scanRoot, repoPath)
+	if err != nil {
+		return filepath.Base(repoPath)
+	}
+	if rel == "." {
+		return "."
+	}
+	return rel
+}
 
 // collectGitRepoPaths walks the tree and returns paths that are git repositories.
-// When hereOnly is true, only path itself is considered (no subdirectory walk).
+// The root may itself be a repo; nested repos under it are still discovered (unless --here).
 func collectGitRepoPaths(path string, depth int, hereOnly bool) ([]string, error) {
 	if hereOnly {
-		if depth > maxDepth {
+		if depth > effectiveScanDepth() {
 			return nil, nil
 		}
 		_, err := git.PlainOpen(path)
 		if err == nil {
-			return []string{path}, nil
-		}
-		if depth == 0 {
-			return nil, nil
+			return []string{canonicalRepoPath(path)}, nil
 		}
 		return nil, nil
 	}
 
-	if depth > maxDepth {
+	if depth > effectiveScanDepth() {
 		return nil, nil
 	}
 
-	_, err := git.PlainOpen(path)
-	if err == nil {
-		return []string{path}, nil
+	var paths []string
+	if _, err := git.PlainOpen(path); err == nil {
+		paths = append(paths, canonicalRepoPath(path))
 	}
 
 	files, err := os.ReadDir(path)
 	if err != nil {
+		if len(paths) > 0 {
+			return paths, nil
+		}
 		if depth == 0 {
 			return nil, err
 		}
 		return nil, nil
 	}
 
-	var paths []string
 	for _, f := range files {
 		if f.Name() == ".git" {
 			continue
@@ -116,11 +148,45 @@ func checkRepositoriesParallel(paths []string) []repoStatus {
 				}
 				return
 			}
-			results[i] = checkRepository(path, r)
+			results[i] = checkRepository(path, r, false)
 		}(i, path)
 	}
 
 	wg.Wait()
 	clearScanProgress()
 	return results
+}
+
+func runListRepos(root string) int {
+	paths, err := collectGitRepoPaths(root, 0, hereOnly)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	scanRoot := canonicalRepoPath(root)
+	sort.Strings(paths)
+	for _, p := range paths {
+		fmt.Println(formatListPath(scanRoot, p))
+	}
+	return 0
+}
+
+// forEachRepoParallel runs fn for each repo index with the same worker pool as scan (--jobs).
+func forEachRepoParallel(indices []int, fn func(i int)) {
+	if len(indices) == 0 {
+		return
+	}
+	jobs := parallelWorkerCount(len(indices))
+	sem := make(chan struct{}, jobs)
+	var wg sync.WaitGroup
+	for _, i := range indices {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
 }
