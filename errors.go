@@ -17,6 +17,15 @@ func userError(kind string, err error) string {
 	return fmt.Sprintf("%s: %v", kind, err)
 }
 
+func userFetchError(originURL string, err error) string {
+	host := originHostLabel(originURL)
+	msg := userError("fetch", err)
+	if host == "" {
+		return msg
+	}
+	return msg + " [" + host + "]"
+}
+
 func classifyError(kind string, err error) string {
 	msg := strings.ToLower(err.Error())
 
@@ -45,6 +54,9 @@ func classifyError(kind string, err error) string {
 	if strings.Contains(msg, "i/o timeout") {
 		return "network timeout"
 	}
+	if strings.Contains(msg, "connection timed out") || strings.Contains(msg, "connect: connection timed out") {
+		return fmt.Sprintf("cannot reach remote (connection timed out after %s)", networkTimeout())
+	}
 	if strings.Contains(msg, "connection refused") {
 		return "connection refused"
 	}
@@ -65,8 +77,11 @@ func classifyError(kind string, err error) string {
 }
 
 func classifyFetch(msg string, err error) string {
+	if errors.Is(err, errSSHPoolBusy) || strings.Contains(msg, "ssh connection pool busy") {
+		return "SSH pool full while other repos fetch (often internal git); GitHub should not see this after rebuild — try --no-fetch"
+	}
 	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "deadline exceeded") {
-		return fmt.Sprintf("timed out (%s)", networkTimeout())
+		return fmt.Sprintf("timed out after %s (dead or slow origin)", networkTimeout())
 	}
 	if strings.Contains(msg, "cannot create known hosts callback") || strings.Contains(msg, "knownhosts") {
 		return "SSH host key setup failed (check known_hosts)"
@@ -82,6 +97,9 @@ func classifyFetch(msg string, err error) string {
 	}
 	if strings.Contains(msg, "lookup") {
 		return "cannot resolve remote host"
+	}
+	if strings.Contains(msg, "connection timed out") || strings.Contains(msg, "connect: connection timed out") {
+		return fmt.Sprintf("cannot reach remote (connection timed out after %s)", networkTimeout())
 	}
 	if strings.Contains(msg, "i/o timeout") {
 		return "cannot reach remote (network timeout)"
