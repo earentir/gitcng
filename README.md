@@ -1,8 +1,8 @@
 # gitcng
 
-Scan a directory tree for git repositories, **fetch `origin`** (SSH via `ssh-agent`, with timeouts), and print a structured status report. Implemented in Go with [go-git](https://github.com/go-git/go-git) — no external `git` binary required.
+Scan a directory tree for git repositories, **fetch `origin`** (SSH via `ssh-agent`, with timeouts), and print a structured status report. Status/diff uses [go-git](https://github.com/go-git/go-git); **fetch/pull/push use `git` from `PATH` when available** so hung SSH dials are killed on the timeout (falls back to go-git if `git` is missing).
 
-Repositories are discovered under `[path]` (default `.`), checked **in parallel**, then optional **pull / push / merge** runs sequentially on repos that need it.
+Repositories are discovered under `[path]` (default `.`), then **check**, **fetch**, and optional **pull / push / merge** all use the same parallel worker pool (`--jobs`); SSH dials are capped at **4** at once.
 
 ## Usage
 
@@ -63,7 +63,7 @@ Line 1 shows the tag name; line 2 shows **Last Release** date; line 3 counts com
 | **`--pull --merge`** | When both local and remote commits exist: if trees do not conflict, create a merge commit and **push** to `origin` (requires **`--pull`**) |
 | **`--push`** | **Push** local commits when clean, not behind, and nothing left to pull |
 
-Pull/push outcomes appear as extra lines at the bottom of each repo block. **`--pull` / `--push`** cannot be combined with **`--count`**, **`--list`**, or **`--format json`**.
+Pull/push outcomes appear as extra lines at the bottom of each repo block. A **summary block** at the top of **`--pull` / `--push`** runs lists what was pulled/skipped; the repo blocks below still use the default **attention filter** (so repos that were pulled clean disappear on the next run unless they still need action or **`--all`**). **`--pull` / `--push`** cannot be combined with **`--count`**, **`--list`**, or **`--format json`**.
 
 Sync uses the same SSH settings as fetch (agent, `known_hosts`, timeouts).
 
@@ -74,7 +74,7 @@ Sync uses the same SSH settings as fetch (agent, `known_hosts`, timeouts).
 | **`--jobs N`** | `0` (auto) | Max repos checked at once (`0` → up to **16**, capped by CPU and repo count) |
 | **`--fetch-timeout N`** | **10** s | Per-repo fetch / SSH dial budget (`0` → 10 s) |
 
-Discovery is sequential; **open, status, fetch, compare, and release math** run in parallel workers.
+Discovery is sequential; **open, status, fetch, compare, release math**, and **`--pull` / `--push`** run in parallel workers (SSH network capped at 4 concurrent).
 
 SSH fetches (and pull/push) share a pool of **4 concurrent** connections, with **retries** on flaky `ssh-agent` handshakes — needed when many Gitea/GitHub repos are fetched at once.
 
@@ -96,9 +96,17 @@ if [ "$(gitcng -q --count remote ..)" -gt 0 ]; then echo "need pull"; fi
 
 Same human report as default, filtered to one metric.
 
+### `list` (subcommand)
+
+```sh
+gitcng list [path]
+```
+
+Walk the tree and print **every git repo path** (one per line). **No fetch, no status scan** — discovery only. Honors **`--depth`** and **`--here`**.
+
 ### `--list`
 
-Print matching **paths** (one per line). Respects **`--only`**; respects default attention filter unless **`--all`**.
+After a full scan, print **every repo found** (one path per line, **relative to the scan root**, e.g. `dso` not a full path). Use **`--only METRIC`** to narrow the list. Use **`gitcng list`** for discovery only (no fetch).
 
 ### Metrics
 
