@@ -51,7 +51,7 @@ type repoStatus struct {
 }
 
 var (
-	appVersion      = "0.1.25"
+	appVersion      = "0.1.31"
 	maxDepth        int
 	showAll         bool
 	reportCompact   bool
