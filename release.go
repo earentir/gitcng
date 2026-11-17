@@ -27,7 +27,14 @@ func enrichRelease(r *git.Repository, tip plumbing.Hash, st *repoStatus, detaile
 		return
 	}
 	if !ok {
-		st.SinceRelease = -1
+		st.NoReleaseTags = true
+		n, err := countCommitsFromTip(r, tip)
+		if err != nil {
+			st.Errs = append(st.Errs, userError("release", err))
+			st.SinceRelease = -1
+			return
+		}
+		st.SinceRelease = n
 		return
 	}
 	if err := setReleaseTagMeta(r, st, tagName, tagHash); err != nil {
