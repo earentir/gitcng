@@ -8,12 +8,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -43,7 +43,8 @@ type repoStatus struct {
 	LastReleaseTag    string
 	LastRelease       time.Time
 	HasLastRelease    bool
-	SinceRelease      int // commits after LastReleaseTag; -1 if none/unknown
+	NoReleaseTags     bool // no tags in repo; SinceRelease is total commits on branch
+	SinceRelease      int // commits after LastReleaseTag, or branch total if NoReleaseTags; -1 if unknown
 	SinceReleaseFiles int
 	ReleaseCommits    []releaseCommit
 	ReleasePaths      []string
@@ -207,8 +208,9 @@ func getSignersFromAgent() ([]ssh.Signer, error) {
 	return agentClient.Signers()
 }
 
-func checkRepository(path string, r *git.Repository) repoStatus {
-	st := repoStatus{Path: path}
+func checkRepository(path string, r *git.Repository, skipFetch bool) repoStatus {
+	st := repoStatus{Path: canonicalRepoPath(path)}
+	path = st.Path
 
 	w, err := r.Worktree()
 	if err != nil {
@@ -253,22 +255,36 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 	}
 	st.RepoName = originRepoName(originURL)
 
-	if !noFetch {
-		tryFetch := func() {
-			writeStatus("Fetching", path)
-			err := fetchOrigin(r, originURL)
-			if err != nil && err != git.NoErrAlreadyUpToDate {
-				kind := "fetch"
-				if isOriginAuthError(err) {
-					kind = "auth"
-				}
-				st.Errs = append(st.Errs, userError(kind, err))
+	if !noFetch && !skipFetch {
+		writeStatus("Fetching", path)
+		fetchErr := fetchOriginAt(path, originURL)
+		if fetchErr != nil && fetchErr != git.NoErrAlreadyUpToDate {
+			if isOriginAuthError(fetchErr) {
+				st.Errs = append(st.Errs, userError("auth", fetchErr)+" ["+originHostLabel(originURL)+"]")
+			} else {
+				st.Errs = append(st.Errs, userFetchError(originURL, fetchErr))
 			}
 		}
-		tryFetch()
+		r, err = git.PlainOpen(path)
+		if err != nil {
+			st.Errs = append(st.Errs, userError("open", err))
+			return st
+		}
+		w, err = r.Worktree()
+		if err != nil {
+			st.Errs = append(st.Errs, userError("worktree", err))
+			return st
+		}
+		headRef, err = r.Head()
+		if err != nil {
+			st.Errs = append(st.Errs, userError("head", err))
+			return st
+		}
+		st.Branch = headRef.Name().Short()
 	}
 
-	remoteRef, err := r.Reference(plumbing.NewRemoteReferenceName("origin", st.Branch), true)
+	candidates := remoteCompareCandidates(r, st.Branch)
+	remoteRef, err := resolveOriginRemoteRef(r, st.Branch)
 	if err != nil {
 		st.Errs = append(st.Errs, originRefError(st.Branch, err))
 		enrichRelease(r, headRef.Hash(), &st, releaseDiff)
@@ -281,6 +297,12 @@ func checkRepository(path string, r *git.Repository) repoStatus {
 		st.Errs = append(st.Errs, userError("compare", err))
 		enrichRelease(r, remoteRef.Hash(), &st, releaseDiff)
 		return st
+	}
+	if cmp, err := gitCompareAheadBehind(path, candidates); err == nil {
+		ahead, behind = cmp.ahead, cmp.behind
+		if ref, err := r.Reference(cmp.ref, true); err == nil {
+			remoteRef = ref
+		}
 	}
 	st.Ahead = ahead
 	st.Behind = behind
@@ -369,11 +391,13 @@ func runScan(root string) int {
 		return 2
 	}
 
+	installBoundedNetworkResolver()
 	initSSHAgent()
 	if err := initFilteredKnownHosts(); err != nil && !quietOutput {
 		fmt.Fprintf(os.Stderr, "warning: %s (SSH fetch may fail)\n", userError("known_hosts", err))
 	}
 
+	scanRoot := canonicalRepoPath(root)
 	paths, err := collectGitRepoPaths(root, 0, hereOnly)
 	if err != nil {
 		clearStatus()
@@ -391,7 +415,7 @@ func runScan(root string) int {
 		applyPushAll()
 		clearStatus()
 	}
-	rows := reposForDisplay(repos, showAll, onlyMetric, pullAll || pushAll)
+	rows := reposForDisplay(repos, showAll, onlyMetric, pullAll, pushAll)
 
 	if promptMode {
 		fmt.Println(countMatching(repos, metricAttention))
@@ -404,8 +428,13 @@ func runScan(root string) int {
 	}
 
 	if listPaths {
-		for _, r := range rows {
-			fmt.Println(r.Path)
+		toList := repos
+		if onlyMetric != "" {
+			toList = rows
+		}
+		sort.Slice(toList, func(i, j int) bool { return toList[i].Path < toList[j].Path })
+		for _, r := range toList {
+			fmt.Println(formatListPath(scanRoot, r.Path))
 		}
 		return scanExitCode(repos)
 	}
@@ -415,7 +444,10 @@ func runScan(root string) int {
 		return scanExitCode(repos)
 	}
 
-	printReport(os.Stdout, rows)
+	if pullAll || pushAll {
+		printSyncSummary(os.Stdout, scanRoot, repos, rows, pullAll, pushAll, showAll)
+	}
+	printReport(os.Stdout, rows, pullAll, pushAll, showAll)
 	return scanExitCode(repos)
 }
 
@@ -432,7 +464,8 @@ Use --compact for one line per repo. Use --all to include clean repos.
 Script mode:
   gitcng --count remote ..           # summary + table
   gitcng -q --count remote ..        # one repo: Remote count only; several: path + Remote per line
-  gitcng --only ahead --list ..      # paths of repos with unpushed commits
+  gitcng list ..                     # paths of every git repo found (no network)
+  gitcng --only ahead --list ..      # paths after full scan (repos with unpushed commits)
 
 METRIC for --count and --only:
   uncommitted, local — dirty files
@@ -486,7 +519,25 @@ METRIC for --count and --only:
 	rootCmd.Flags().BoolVar(&noFetch, "no-fetch", false, "skip origin fetch and use cached refs (faster; remote counts may be stale)")
 	rootCmd.Flags().StringVar(&colourMode, "colour", "auto", "colourise output: auto, always, or never (also NO_COLOR/NO_COLOUR, FORCE_COLOR/FORCE_COLOUR)")
 
+	listCmd := &cobra.Command{
+		Use:   "list [path]",
+		Short: "List git repository paths under path (discovery only; no fetch or status)",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(_ *cobra.Command, args []string) {
+			root := "."
+			if len(args) > 0 {
+				root = args[0]
+			}
+			os.Exit(runListRepos(root))
+		},
+	}
+	listCmd.Flags().IntVar(&maxDepth, "depth", 4, "the maximum depth")
+	listCmd.Flags().BoolVar(&hereOnly, "here", false, "only check path if it is a git repo; do not scan subdirectories")
+	listCmd.ValidArgsFunction = completeScanPath
+	rootCmd.AddCommand(listCmd)
+
 	registerCompletions(rootCmd)
+	registerCompletions(listCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
